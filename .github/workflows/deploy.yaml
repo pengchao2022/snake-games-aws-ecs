@@ -7,7 +7,6 @@ on:
 env:
   AWS_REGION: us-east-1
   TF_WORKING_DIR: './terraform'
-  # 如果你的 Dockerfile 在 src 目录（你之前有用过 cd src），把 ECR_BUILD_FALLBACK_DIR 设置为 src
   ECR_REPO: 'snake-game-repo'
   ECS_CLUSTER: 'snake-game-cluster'
   ECS_SERVICE: 'snake-game-service'
@@ -64,7 +63,6 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
 
-    # 重新初始化 backend，从 S3 拉取 state（如果你用 S3 backend）
     - name: Terraform Init (Load Backend)
       working-directory: ${{ env.TF_WORKING_DIR }}
       run: terraform init -reconfigure
@@ -89,7 +87,6 @@ jobs:
         for d in ./*; do echo "$d"; done
         echo "---------------------------"
 
-    # Build step: 自动查找 Dockerfile，优先检查常见目录 app/ 和 src/，否则搜索仓库（最多到3层）
     - name: Build, Tag, and Push Docker Image
       env:
         ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
@@ -97,10 +94,9 @@ jobs:
       run: |
         set -euo pipefail
 
-        # 首先检查常见位置（./app, ./src）
+        # 查找 Dockerfile
         CANDIDATES="./app ./src ."
         DOCKERFILE_PATH=""
-
         for d in $CANDIDATES; do
           if [ -f "$d/Dockerfile" ]; then
             DOCKERFILE_PATH="$d/Dockerfile"
@@ -108,7 +104,6 @@ jobs:
           fi
         done
 
-        # 如果在常见位置没找到，再在仓库中搜索（限制深度以防太慢）
         if [ -z "$DOCKERFILE_PATH" ]; then
           FOUND=$(find . -maxdepth 4 -type f -name Dockerfile | head -n 1 || true)
           if [ -n "$FOUND" ]; then
@@ -117,9 +112,7 @@ jobs:
         fi
 
         if [ -z "$DOCKERFILE_PATH" ]; then
-          echo "❌ No Dockerfile found in ./app, ./src, or repository root (searched depth 4)."
-          echo "Repository listing for debugging:"
-          ls -la
+          echo "❌ No Dockerfile found!"
           exit 1
         fi
 
@@ -128,22 +121,24 @@ jobs:
         echo "Using build dir: $BUILD_DIR"
 
         IMAGE_TAG=${GITHUB_SHA}
-        IMAGE_URI="${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}"
+        ECR_IMAGE_SHA="${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}"
+        ECR_IMAGE_LATEST="${ECR_REGISTRY}/${ECR_REPO}:latest"
 
-        echo "Building image: $IMAGE_URI"
-        docker build -t "$IMAGE_URI" "$BUILD_DIR"
+        echo "🛠 Building image: $ECR_IMAGE_SHA"
+        docker build -t "$ECR_IMAGE_SHA" "$BUILD_DIR"
 
-        echo "Pushing image to ECR: $IMAGE_URI"
-        docker push "$IMAGE_URI"
+        echo "🏷 Tagging image as latest: $ECR_IMAGE_LATEST"
+        docker tag "$ECR_IMAGE_SHA" "$ECR_IMAGE_LATEST"
 
-        # 将 IMAGE_URI 导出给后续步骤
-        echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_ENV
-        echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
+        echo "📤 Pushing both tags to ECR..."
+        docker push "$ECR_IMAGE_SHA"
+        docker push "$ECR_IMAGE_LATEST"
+
+        echo "✅ Image pushed: $ECR_IMAGE_SHA and latest"
+        echo "IMAGE_URI=$ECR_IMAGE_LATEST" >> $GITHUB_ENV
 
     - name: Update ECS Service (force new deployment)
       run: |
-        # 注意：如果你的 ECS task 定义是固定某个 image tag，你可能需要先 register new task definition 替换 image 字段然后更新 service。
-        # 这里使用 force-new-deployment 来触发服务重启（适合 task 定义使用相同 image name+tag 的场景或 image:latest）。
         echo "Triggering ECS service update (force new deployment)..."
         aws ecs update-service \
           --cluster "${{ env.ECS_CLUSTER }}" \
