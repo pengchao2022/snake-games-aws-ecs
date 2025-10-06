@@ -1,5 +1,4 @@
 import random
-import json
 from datetime import datetime
 
 class SnakeGame:
@@ -15,22 +14,24 @@ class SnakeGame:
     def reset(self):
         self.snake = [(self.width // 2, self.height // 2)]
         self.direction = 'RIGHT'
-        self.food = self.generate_food()
         self.score = 0
         self.level = 1
         self.game_over = False
-        self.speed = 600  # 起始速度(ms)
+        self.speed = 600
         self.moves_count = 0
-    
-    def generate_food(self):
+        self.food = self._generate_food()
+
+    def _generate_food(self):
+        """生成一个不在蛇身上的食物"""
         while True:
-            food = (random.randint(0, self.width - 1), random.randint(0, self.height - 1))
-            if food not in self.snake:
-                return food
+            x = random.randint(0, self.width - 1)
+            y = random.randint(0, self.height - 1)
+            if (x, y) not in self.snake:
+                return (x, y)
     
     def change_direction(self, new_direction):
-        opposite_directions = {'UP': 'DOWN', 'DOWN': 'UP', 'LEFT': 'RIGHT', 'RIGHT': 'LEFT'}
-        if new_direction != opposite_directions.get(self.direction):
+        opposite = {'UP':'DOWN','DOWN':'UP','LEFT':'RIGHT','RIGHT':'LEFT'}
+        if new_direction != opposite.get(self.direction):
             self.direction = new_direction
     
     def move(self):
@@ -38,17 +39,16 @@ class SnakeGame:
             return False
         
         head_x, head_y = self.snake[0]
-        
         if self.direction == 'UP':
             new_head = (head_x, head_y - 1)
         elif self.direction == 'DOWN':
             new_head = (head_x, head_y + 1)
         elif self.direction == 'LEFT':
             new_head = (head_x - 1, head_y)
-        elif self.direction == 'RIGHT':
+        else:  # RIGHT
             new_head = (head_x + 1, head_y)
         
-        # 碰撞检测
+        # 撞墙或撞自己
         if (new_head[0] < 0 or new_head[0] >= self.width or
             new_head[1] < 0 or new_head[1] >= self.height or
             new_head in self.snake):
@@ -57,19 +57,18 @@ class SnakeGame:
         
         self.snake.insert(0, new_head)
         self.moves_count += 1
-        
-        # 吃到食物
+
+        # 吃食物
         if new_head == self.food:
             self.score += 10
-            self.food = self.generate_food()
-            if self.score % 50 == 0:
+            self.food = self._generate_food()  # 生成新食物
+            if self.score % 50 == 0 and self.speed > 50:
                 self.level += 1
-                if self.speed > 50:
-                    self.speed -= 10
-            return True
+                self.speed -= 10
         else:
             self.snake.pop()
-            return False
+        
+        return True
     
     def get_state(self):
         return {
@@ -85,25 +84,8 @@ class SnakeGame:
             'height': self.height,
             'moves_count': self.moves_count
         }
-    
-    def from_dict(self, data):
-        self.session_id = data['id']
-        self.snake = data['snake']
-        self.food = data['food']
-        self.score = data['score']
-        self.level = data.get('level', 1)
-        self.direction = data['direction']
-        self.game_over = data['game_over']
-        self.speed = data.get('speed', 600)
-        self.width = data['width']
-        self.height = data['height']
-        self.moves_count = data.get('moves_count', 0)
-    
-    # ----------------------------
-    # 美观显示函数 (终端用)
-    # ----------------------------
+
     def render(self):
-        # 使用 Unicode 方块显示
         board = ""
         for y in range(self.height):
             for x in range(self.width):
