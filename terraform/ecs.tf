@@ -1,6 +1,3 @@
-# ------------------------
-# ECS 安全组
-# ------------------------
 resource "aws_security_group" "ecs" {
   name        = "${local.name_prefix}-ecs-sg"
   description = "Security group for Snake Game ECS"
@@ -29,9 +26,6 @@ resource "aws_security_group" "ecs" {
   }
 }
 
-# ------------------------
-# ALB 安全组
-# ------------------------
 resource "aws_security_group" "alb" {
   name        = "${local.name_prefix}-alb-sg"
   description = "Security group for Snake Game ALB"
@@ -66,9 +60,6 @@ resource "aws_security_group" "alb" {
   }
 }
 
-# ------------------------
-# ECR 仓库
-# ------------------------
 resource "aws_ecr_repository" "snake_game" {
   name = "snake-game-repo"
 
@@ -82,9 +73,6 @@ resource "aws_ecr_repository" "snake_game" {
   }
 }
 
-# ------------------------
-# ECS 集群
-# ------------------------
 resource "aws_ecs_cluster" "snake_game" {
   name = "snake-game-cluster"
 
@@ -99,9 +87,6 @@ resource "aws_ecs_cluster" "snake_game" {
   }
 }
 
-# ------------------------
-# ECS 任务执行角色
-# ------------------------
 resource "aws_iam_role" "ecs_task_execution_role" {
   name = "ecsTaskExecutionRole"
 
@@ -218,9 +203,6 @@ resource "aws_iam_role_policy" "cloudwatch_logs" {
   })
 }
 
-# ------------------------
-# ECS 任务定义
-# ------------------------
 resource "aws_ecs_task_definition" "snake_game" {
   family                   = "${local.name_prefix}-task"
   network_mode             = "awsvpc"
@@ -271,9 +253,6 @@ resource "aws_ecs_task_definition" "snake_game" {
   }
 }
 
-# ------------------------
-# ECS 服务
-# ------------------------
 resource "aws_ecs_service" "snake_game" {
   name            = "snake-game-service"
   cluster         = aws_ecs_cluster.snake_game.id
@@ -301,9 +280,6 @@ resource "aws_ecs_service" "snake_game" {
   }
 }
 
-# ------------------------
-# Application Load Balancer
-# ------------------------
 resource "aws_lb" "snake_game" {
   name               = "${local.name_prefix}-alb"
   internal           = false
@@ -319,9 +295,6 @@ resource "aws_lb" "snake_game" {
   }
 }
 
-# ------------------------
-# ALB 目标组
-# ------------------------
 resource "aws_lb_target_group" "snake_game" {
   name        = "${local.name_prefix}-tg"
   port        = 5000
@@ -345,9 +318,6 @@ resource "aws_lb_target_group" "snake_game" {
   }
 }
 
-# ------------------------
-# ALB 监听器
-# ------------------------
 resource "aws_lb_listener" "snake_game" {
   load_balancer_arn = aws_lb.snake_game.arn
   port              = "80"
@@ -364,9 +334,6 @@ resource "aws_lb_listener" "snake_game" {
   }
 }
 
-# ------------------------
-# CloudWatch 日志组
-# ------------------------
 resource "aws_cloudwatch_log_group" "ecs" {
   name              = "/ecs/${local.name_prefix}"
   retention_in_days = 30
@@ -377,9 +344,6 @@ resource "aws_cloudwatch_log_group" "ecs" {
   }
 }
 
-# ------------------------
-# 自动扩展策略
-# ------------------------
 resource "aws_appautoscaling_target" "ecs_target" {
   max_capacity       = 4
   min_capacity       = 1
