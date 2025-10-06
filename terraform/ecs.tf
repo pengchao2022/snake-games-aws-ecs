@@ -1,9 +1,16 @@
+###########################################################
+# ECS + ALB + ECR 配置 (Snake Game)
+###########################################################
+
+# ------------------------
 # ECS 安全组
+# ------------------------
 resource "aws_security_group" "ecs" {
   name        = "${local.name_prefix}-ecs-sg"
   description = "Security group for Snake Game ECS"
   vpc_id      = aws_vpc.main.id
 
+  # 允许 ALB 安全组访问容器端口 5000
   ingress {
     from_port       = 5000
     to_port         = 5000
@@ -11,6 +18,7 @@ resource "aws_security_group" "ecs" {
     security_groups = [aws_security_group.alb.id]
   }
 
+  # ECS 容器访问外网（拉镜像、访问数据库等）
   egress {
     from_port   = 0
     to_port     = 0
@@ -25,7 +33,47 @@ resource "aws_security_group" "ecs" {
   }
 }
 
+# ------------------------
+# ALB 安全组
+# ------------------------
+resource "aws_security_group" "alb" {
+  name        = "${local.name_prefix}-alb-sg"
+  description = "Security group for Snake Game ALB"
+  vpc_id      = aws_vpc.main.id
+
+  # 公网访问 HTTP/HTTPS
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # ALB 可以访问 ECS 容器
+  egress {
+    from_port       = 0
+    to_port         = 0
+    protocol        = "-1"
+    security_groups = [aws_security_group.ecs.id]
+  }
+
+  tags = {
+    Name        = "${local.name_prefix}-alb-sg"
+    Environment = var.environment
+    Project     = "snake-game"
+  }
+}
+
+# ------------------------
 # ECR 仓库
+# ------------------------
 resource "aws_ecr_repository" "snake_game" {
   name = "snake-game-repo"
 
@@ -39,7 +87,9 @@ resource "aws_ecr_repository" "snake_game" {
   }
 }
 
+# ------------------------
 # ECS 集群
+# ------------------------
 resource "aws_ecs_cluster" "snake_game" {
   name = "snake-game-cluster"
 
@@ -54,7 +104,9 @@ resource "aws_ecs_cluster" "snake_game" {
   }
 }
 
+# ------------------------
 # ECS 任务执行角色
+# ------------------------
 resource "aws_iam_role" "ecs_task_execution_role" {
   name = "ecsTaskExecutionRole"
 
@@ -171,7 +223,9 @@ resource "aws_iam_role_policy" "cloudwatch_logs" {
   })
 }
 
+# ------------------------
 # ECS 任务定义
+# ------------------------
 resource "aws_ecs_task_definition" "snake_game" {
   family                   = "${local.name_prefix}-task"
   network_mode             = "awsvpc"
@@ -191,20 +245,12 @@ resource "aws_ecs_task_definition" "snake_game" {
       protocol      = "tcp"
     }]
     environment = [
-      {
-        name  = "ENVIRONMENT"
-        value = var.environment
-      },
-      {
-        name  = "AWS_REGION"
-        value = var.aws_region
-      }
+      { name = "ENVIRONMENT", value = var.environment },
+      { name = "AWS_REGION", value = var.aws_region }
     ]
     secrets = [
-      {
-        name      = "DATABASE_URL"
-        valueFrom = aws_ssm_parameter.database_url.arn
-      }
+      { name = "DATABASE_URL", valueFrom = aws_ssm_parameter.database_url.arn },
+      { name = "DATABASE_PASSWORD", valueFrom = aws_ssm_parameter.database_password.arn }
     ]
     logConfiguration = {
       logDriver = "awslogs"
@@ -222,7 +268,9 @@ resource "aws_ecs_task_definition" "snake_game" {
   }
 }
 
+# ------------------------
 # ECS 服务
+# ------------------------
 resource "aws_ecs_service" "snake_game" {
   name            = "snake-game-service"
   cluster         = aws_ecs_cluster.snake_game.id
@@ -250,7 +298,9 @@ resource "aws_ecs_service" "snake_game" {
   }
 }
 
+# ------------------------
 # Application Load Balancer
+# ------------------------
 resource "aws_lb" "snake_game" {
   name               = "${local.name_prefix}-alb"
   internal           = false
@@ -261,40 +311,6 @@ resource "aws_lb" "snake_game" {
   enable_deletion_protection = false
 
   tags = {
-    Environment = var.environment
-    Project     = "snake-game"
-  }
-}
-
-# ALB 安全组
-resource "aws_security_group" "alb" {
-  name        = "${local.name_prefix}-alb-sg"
-  description = "Security group for Snake Game ALB"
-  vpc_id      = aws_vpc.main.id
-
-  ingress {
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  ingress {
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  tags = {
-    Name        = "${local.name_prefix}-alb-sg"
     Environment = var.environment
     Project     = "snake-game"
   }
@@ -312,10 +328,10 @@ resource "aws_lb_target_group" "snake_game" {
     path                = "/health"
     protocol            = "HTTP"
     timeout             = 5
-    interval            = 30
+    interval            = 15
     healthy_threshold   = 2
     unhealthy_threshold = 2
-    matcher             = "200"
+    matcher             = "200-299"
   }
 
   tags = {
@@ -327,7 +343,7 @@ resource "aws_lb_target_group" "snake_game" {
 # ALB 监听器
 resource "aws_lb_listener" "snake_game" {
   load_balancer_arn = aws_lb.snake_game.arn
-  port              = "80"
+  port              = 80
   protocol          = "HTTP"
 
   default_action {
@@ -352,7 +368,9 @@ resource "aws_cloudwatch_log_group" "ecs" {
   }
 }
 
-# 自动扩展策略
+# ------------------------
+# ECS 自动扩展策略
+# ------------------------
 resource "aws_appautoscaling_target" "ecs_target" {
   max_capacity       = 4
   min_capacity       = 1
