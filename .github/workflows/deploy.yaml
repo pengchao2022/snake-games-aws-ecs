@@ -65,69 +65,16 @@ jobs:
         docker tag snake-game:latest ${{ steps.login-ecr.outputs.registry }}/snake-game:latest
         docker push ${{ steps.login-ecr.outputs.registry }}/snake-game:latest
 
-    - name: Get SSM Parameter for Database URL
-      id: ssm-param
+    - name: Update task definition with new image
+      id: update-task-def
       run: |
-        DATABASE_URL=$(aws ssm get-parameter \
-          --name "/snake-game/production/database-url" \
-          --with-decryption \
-          --query "Parameter.Value" \
-          --output text)
-        echo "DATABASE_URL=$DATABASE_URL" >> $GITHUB_ENV
-
-    - name: Create ECS task definition
-      run: |
-        # 直接从环境变量获取数据库URL，不使用SSM secrets
-        cat > task-definition.json << EOF
-        {
-          "family": "snake-game-task",
-          "networkMode": "awsvpc",
-          "requiresCompatibilities": ["FARGATE"],
-          "cpu": "256",
-          "memory": "512",
-          "executionRoleArn": "arn:aws:iam::$(aws sts get-caller-identity --query Account --output text):role/ecsTaskExecutionRole",
-          "containerDefinitions": [
-            {
-              "name": "snake-game",
-              "image": "${{ steps.login-ecr.outputs.registry }}/snake-game:latest",
-              "essential": true,
-              "portMappings": [
-                {
-                  "containerPort": 5000,
-                  "hostPort": 5000,
-                  "protocol": "tcp"
-                }
-              ],
-              "environment": [
-                {
-                  "name": "DATABASE_URL",
-                  "value": "${{ env.DATABASE_URL }}"
-                },
-                {
-                  "name": "ENVIRONMENT",
-                  "value": "production"
-                },
-                {
-                  "name": "AWS_REGION",
-                  "value": "${{ env.AWS_REGION }}"
-                }
-              ],
-              "logConfiguration": {
-                "logDriver": "awslogs",
-                "options": {
-                  "awslogs-group": "/ecs/snake-game-production",
-                  "awslogs-region": "${{ env.AWS_REGION }}",
-                  "awslogs-stream-prefix": "ecs"
-                }
-              }
-            }
-          ]
-        }
-        EOF
+        # 使用现有的 task-definition.json，只更新镜像
+        jq '.containerDefinitions[0].image = "${{ steps.login-ecr.outputs.registry }}/snake-game:latest"' task-definition.json > updated-task-definition.json
+        echo "Task definition updated with new image"
 
     - name: Register ECS task definition
       run: |
-        aws ecs register-task-definition --cli-input-json file://task-definition.json
+        aws ecs register-task-definition --cli-input-json file://updated-task-definition.json
 
     - name: Update ECS service
       run: |
@@ -139,6 +86,7 @@ jobs:
 
     - name: Wait for deployment
       run: |
+        echo "Waiting for deployment to complete..."
         sleep 30
         aws ecs wait services-stable \
           --cluster snake-game-production-cluster \
@@ -152,13 +100,29 @@ jobs:
           --output text)
         
         echo "Application URL: http://$LOAD_BALANCER_DNS"
+        echo "Testing health endpoint..."
         
         # 健康检查
-        for i in {1..30}; do
-          if curl -f -s http://$LOAD_BALANCER_DNS/health; then
-            echo "✅ Application is healthy!"
+        for i in {1..10}; do
+          if curl -f -s http://$LOAD_BALANCER_DNS/health > /dev/null; then
+            echo "✅ Health check passed!"
             break
+          else
+            echo "⏳ Health check attempt $i failed, retrying in 10 seconds..."
+            sleep 10
           fi
-          echo "⏳ Waiting for application to start... ($i/30)"
-          sleep 10
         done
+
+    - name: Deployment Summary
+      run: |
+        LOAD_BALANCER_DNS=$(aws elbv2 describe-load-balancers \
+          --query 'LoadBalancers[?LoadBalancerName==`snake-game-production-alb`].DNSName' \
+          --output text)
+        
+        echo "🎉 Deployment Completed Successfully!"
+        echo "========================================"
+        echo "🌐 Application URL: http://$LOAD_BALANCER_DNS"
+        echo "🛠️  Health Check: http://$LOAD_BALANCER_DNS/health"
+        echo "🐳 ECR Image: ${{ steps.login-ecr.outputs.registry }}/snake-game:latest"
+        echo "⚓ ECS Cluster: snake-game-production-cluster"
+        echo "🔧 ECS Service: snake-game-service"
