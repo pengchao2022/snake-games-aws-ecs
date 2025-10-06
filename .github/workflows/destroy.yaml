@@ -1,0 +1,85 @@
+name: Destroy Snake Game Infrastructure
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to destroy'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+        - dev
+        - staging
+        - production
+      confirm_destroy:
+        description: 'Type "destroy" to confirm infrastructure destruction'
+        required: true
+        type: string
+
+env:
+  AWS_REGION: us-east-1
+  TF_WORKING_DIR: './terraform'
+
+jobs:
+  destroy:
+    name: Destroy Infrastructure
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+
+    steps:
+    - name: Check destruction confirmation
+      if: github.event.inputs.confirm_destroy != 'destroy'
+      run: |
+        echo "❌ Destruction not confirmed. Please type 'destroy' to confirm."
+        exit 1
+
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: 1.5.0
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Terraform Init
+      run: |
+        cd ${{ env.TF_WORKING_DIR }}
+        terraform init
+
+    - name: Terraform Destroy
+      run: |
+        cd ${{ env.TF_WORKING_DIR }}
+        terraform destroy -auto-approve -var-file="terraform.tfvars" -var="environment=${{ github.event.inputs.environment }}"
+      env:
+        TF_VAR_db_password: ${{ secrets.DB_PASSWORD }}
+
+    - name: Clean up ECR images
+      run: |
+        # 删除ECR仓库中的镜像
+        aws ecr list-images --repository-name snake-game --query 'imageIds[?type(imageTag)!=`string`]' --output json | jq -r '.[].imageDigest' | while read digest; do
+          aws ecr batch-delete-image --repository-name snake-game --image-ids imageDigest=$digest
+        done
+        
+        # 删除有标签的镜像（保留最新的5个）
+        aws ecr list-images --repository-name snake-game --query 'sort_by(imageIds[?imageTag], &imageTag)[:-5].imageTag' --output json | jq -r '.[]' | while read tag; do
+          aws ecr batch-delete-image --repository-name snake-game --image-ids imageTag=$tag
+        done
+
+    - name: Send destruction notification
+      run: |
+        echo "✅ Infrastructure for environment '${{ github.event.inputs.environment }}' has been destroyed successfully"
+        echo "📝 Remaining resources:"
+        echo "   - ECR repository: snake-game (images cleaned up)"
+        echo "   - S3 state bucket: snake-game-terraform-state"
+        echo "⚠️  Note: Manual cleanup may be required for:"
+        echo "   - CloudWatch Logs groups"
+        echo "   - IAM roles/policies created by ECS"
+        echo "   - S3 state bucket (if you want to completely remove everything)"
