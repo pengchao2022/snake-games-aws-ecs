@@ -59,3 +59,43 @@ output "db_password" {
   value       = local.db_password_final
   sensitive   = true
 }
+
+output "ecr_repository_url" {
+  description = "ECR repository URL"
+  value       = aws_ecr_repository.snake_game.repository_url
+}
+
+output "ecs_cluster_name" {
+  description = "ECS cluster name"
+  value       = aws_ecs_cluster.snake_game.name
+}
+
+output "ecs_service_name" {
+  description = "ECS service name"
+  value       = aws_ecs_service.snake_game.name
+}
+
+output "load_balancer_dns" {
+  description = "Load Balancer DNS name"
+  value       = aws_lb.snake_game.dns_name
+}
+
+output "load_balancer_arn" {
+  description = "Load Balancer ARN"
+  value       = aws_lb.snake_game.arn
+}
+
+output "target_group_arn" {
+  description = "Target Group ARN"
+  value       = aws_lb_target_group.snake_game.arn
+}
+
+output "ecs_task_execution_role_arn" {
+  description = "ECS Task Execution Role ARN"
+  value       = aws_iam_role.ecs_task_execution_role.arn
+}
+
+output "ecs_task_role_arn" {
+  description = "ECS Task Role ARN"
+  value       = aws_iam_role.ecs_task_role.arn
+}

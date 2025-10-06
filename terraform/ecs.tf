@@ -5,10 +5,10 @@ resource "aws_security_group" "ecs" {
   vpc_id      = aws_vpc.main.id
 
   ingress {
-    from_port   = 5000
-    to_port     = 5000
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    from_port       = 5000
+    to_port         = 5000
+    protocol        = "tcp"
+    security_groups = [aws_security_group.alb.id]
   }
 
   egress {
@@ -52,6 +52,123 @@ resource "aws_ecs_cluster" "snake_game" {
     Environment = var.environment
     Project     = "snake-game"
   }
+}
+
+# ECS 任务执行角色
+resource "aws_iam_role" "ecs_task_execution_role" {
+  name = "ecsTaskExecutionRole"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "ecs-tasks.amazonaws.com"
+        }
+      }
+    ]
+  })
+
+  tags = {
+    Environment = var.environment
+    Project     = "snake-game"
+  }
+}
+
+# ECS 任务角色
+resource "aws_iam_role" "ecs_task_role" {
+  name = "${local.name_prefix}-ecs-task-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "ecs-tasks.amazonaws.com"
+        }
+      }
+    ]
+  })
+
+  tags = {
+    Environment = var.environment
+    Project     = "snake-game"
+  }
+}
+
+# ECS 任务执行角色策略
+resource "aws_iam_role_policy_attachment" "ecs_task_execution_role_policy" {
+  role       = aws_iam_role.ecs_task_execution_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}
+
+# ECR 访问策略
+resource "aws_iam_role_policy" "ecr_access" {
+  name = "ecs-task-execution-ecr-access"
+  role = aws_iam_role.ecs_task_execution_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "ecr:GetAuthorizationToken",
+          "ecr:BatchCheckLayerAvailability",
+          "ecr:GetDownloadUrlForLayer",
+          "ecr:BatchGetImage"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+}
+
+# SSM 参数读取策略
+resource "aws_iam_role_policy" "ssm_access" {
+  name = "${local.name_prefix}-ssm-access"
+  role = aws_iam_role.ecs_task_execution_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "ssm:GetParameters",
+          "ssm:GetParameter"
+        ]
+        Resource = [
+          aws_ssm_parameter.database_url.arn,
+          aws_ssm_parameter.database_password.arn
+        ]
+      }
+    ]
+  })
+}
+
+# CloudWatch 日志策略
+resource "aws_iam_role_policy" "cloudwatch_logs" {
+  name = "${local.name_prefix}-cloudwatch-logs"
+  role = aws_iam_role.ecs_task_execution_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ]
+        Resource = "arn:aws:logs:*:*:log-group:/ecs/${local.name_prefix}:*"
+      }
+    ]
+  })
 }
 
 # ECS 任务定义
@@ -224,123 +341,6 @@ resource "aws_lb_listener" "snake_game" {
   }
 }
 
-# ECS 任务执行角色
-resource "aws_iam_role" "ecs_task_execution_role" {
-  name = "${local.name_prefix}-ecs-task-execution-role"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Action = "sts:AssumeRole"
-        Effect = "Allow"
-        Principal = {
-          Service = "ecs-tasks.amazonaws.com"
-        }
-      }
-    ]
-  })
-
-  tags = {
-    Environment = var.environment
-    Project     = "snake-game"
-  }
-}
-
-# ECS 任务角色
-resource "aws_iam_role" "ecs_task_role" {
-  name = "${local.name_prefix}-ecs-task-role"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Action = "sts:AssumeRole"
-        Effect = "Allow"
-        Principal = {
-          Service = "ecs-tasks.amazonaws.com"
-        }
-      }
-    ]
-  })
-
-  tags = {
-    Environment = var.environment
-    Project     = "snake-game"
-  }
-}
-
-# ECS 任务执行角色策略
-resource "aws_iam_role_policy_attachment" "ecs_task_execution_role_policy" {
-  role       = aws_iam_role.ecs_task_execution_role.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
-}
-
-# ECR 访问策略
-resource "aws_iam_role_policy" "ecr_access" {
-  name = "${local.name_prefix}-ecr-access"
-  role = aws_iam_role.ecs_task_execution_role.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "ecr:GetAuthorizationToken",
-          "ecr:BatchCheckLayerAvailability",
-          "ecr:GetDownloadUrlForLayer",
-          "ecr:BatchGetImage"
-        ]
-        Resource = "*"
-      }
-    ]
-  })
-}
-
-# SSM 参数读取策略
-resource "aws_iam_role_policy" "ssm_access" {
-  name = "${local.name_prefix}-ssm-access"
-  role = aws_iam_role.ecs_task_execution_role.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "ssm:GetParameters",
-          "ssm:GetParameter"
-        ]
-        Resource = [
-          aws_ssm_parameter.database_url.arn,
-          aws_ssm_parameter.database_password.arn
-        ]
-      }
-    ]
-  })
-}
-
-# CloudWatch 日志策略
-resource "aws_iam_role_policy" "cloudwatch_logs" {
-  name = "${local.name_prefix}-cloudwatch-logs"
-  role = aws_iam_role.ecs_task_execution_role.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "logs:CreateLogStream",
-          "logs:PutLogEvents"
-        ]
-        Resource = "arn:aws:logs:*:*:log-group:/ecs/${local.name_prefix}:*"
-      }
-    ]
-  })
-}
-
 # CloudWatch 日志组
 resource "aws_cloudwatch_log_group" "ecs" {
   name              = "/ecs/${local.name_prefix}"
@@ -349,5 +349,44 @@ resource "aws_cloudwatch_log_group" "ecs" {
   tags = {
     Environment = var.environment
     Project     = "snake-game"
+  }
+}
+
+# 自动扩展策略
+resource "aws_appautoscaling_target" "ecs_target" {
+  max_capacity       = 4
+  min_capacity       = 1
+  resource_id        = "service/${aws_ecs_cluster.snake_game.name}/${aws_ecs_service.snake_game.name}"
+  scalable_dimension = "ecs:service:DesiredCount"
+  service_namespace  = "ecs"
+}
+
+resource "aws_appautoscaling_policy" "ecs_cpu_scaling" {
+  name               = "${local.name_prefix}-cpu-scaling"
+  policy_type        = "TargetTrackingScaling"
+  resource_id        = aws_appautoscaling_target.ecs_target.resource_id
+  scalable_dimension = aws_appautoscaling_target.ecs_target.scalable_dimension
+  service_namespace  = aws_appautoscaling_target.ecs_target.service_namespace
+
+  target_tracking_scaling_policy_configuration {
+    predefined_metric_specification {
+      predefined_metric_type = "ECSServiceAverageCPUUtilization"
+    }
+    target_value = 70.0
+  }
+}
+
+resource "aws_appautoscaling_policy" "ecs_memory_scaling" {
+  name               = "${local.name_prefix}-memory-scaling"
+  policy_type        = "TargetTrackingScaling"
+  resource_id        = aws_appautoscaling_target.ecs_target.resource_id
+  scalable_dimension = aws_appautoscaling_target.ecs_target.scalable_dimension
+  service_namespace  = aws_appautoscaling_target.ecs_target.service_namespace
+
+  target_tracking_scaling_policy_configuration {
+    predefined_metric_specification {
+      predefined_metric_type = "ECSServiceAverageMemoryUtilization"
+    }
+    target_value = 80.0
   }
 }
