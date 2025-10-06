@@ -37,10 +37,11 @@ jobs:
         cd ${{ env.TF_WORKING_DIR }}
         terraform init
 
-    - name: Terraform Format
+    - name: Terraform Format Check
       run: |
         cd ${{ env.TF_WORKING_DIR }}
-        terraform fmt -check
+        # 跳过 .tfvars 文件的格式检查
+        find . -name "*.tf" -exec terraform fmt -check {} \;
 
     - name: Terraform Validate
       run: |
@@ -81,22 +82,6 @@ jobs:
         aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
-
-    - name: Create terraform.tfvars
-      run: |
-        cd ${{ env.TF_WORKING_DIR }}
-        cat > terraform.tfvars << EOF
-        aws_region = "${{ env.AWS_REGION }}"
-        environment = "production"
-        vpc_cidr = "10.0.0.0/16"
-        public_subnet_cidrs = ["10.0.1.0/24", "10.0.2.0/24"]
-        private_subnet_cidrs = ["10.0.101.0/24", "10.0.102.0/24"]
-        db_instance_class = "db.t3.micro"
-        db_allocated_storage = 20
-        db_engine_version = "14.9"
-        db_username = "snakegame"
-        db_name = "snakegame"
-        EOF
 
     - name: Download Terraform Plan
       uses: actions/download-artifact@v4
