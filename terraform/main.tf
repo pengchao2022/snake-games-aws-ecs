@@ -28,6 +28,17 @@ resource "random_password" "db_password" {
   special = false
 }
 
+# ECR Repository
+resource "aws_ecr_repository" "snake_game_repo" {
+  name                 = "snake-game-repo"
+  image_tag_mutability = "MUTABLE"
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+}
+
+
 locals {
   db_password_final = var.db_password != "" ? var.db_password : random_password.db_password[0].result
   environment_lower = lower(var.environment)
