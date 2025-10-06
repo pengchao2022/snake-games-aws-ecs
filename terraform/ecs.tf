@@ -257,7 +257,7 @@ resource "aws_ecs_service" "snake_game" {
   name            = "snake-game-service"
   cluster         = aws_ecs_cluster.snake_game.id
   task_definition = aws_ecs_task_definition.snake_game.arn
-  desired_count   = 1
+  desired_count   = 2
   launch_type     = "FARGATE"
 
   network_configuration {
@@ -281,7 +281,7 @@ resource "aws_ecs_service" "snake_game" {
 }
 
 resource "aws_lb" "snake_game" {
-  name               = "${local.name_prefix}-alb"
+  name               = "snakegame-alb"
   internal           = false
   load_balancer_type = "application"
   security_groups    = [aws_security_group.alb.id]
