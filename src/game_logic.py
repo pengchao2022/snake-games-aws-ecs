@@ -1,5 +1,6 @@
 import random
-import json
+import curses
+import time
 from datetime import datetime
 
 class SnakeGame:
@@ -19,7 +20,7 @@ class SnakeGame:
         self.score = 0
         self.level = 1
         self.game_over = False
-        self.speed = 400  # 移动速度（毫秒）
+        self.speed = 600  # 初始速度，毫秒
         self.moves_count = 0
     
     def generate_food(self):
@@ -29,8 +30,8 @@ class SnakeGame:
                 return food
     
     def change_direction(self, new_direction):
-        opposite_directions = {'UP': 'DOWN', 'DOWN': 'UP', 'LEFT': 'RIGHT', 'RIGHT': 'LEFT'}
-        if new_direction != opposite_directions.get(self.direction):
+        opposite = {'UP':'DOWN','DOWN':'UP','LEFT':'RIGHT','RIGHT':'LEFT'}
+        if new_direction != opposite.get(self.direction):
             self.direction = new_direction
     
     def move(self):
@@ -38,7 +39,6 @@ class SnakeGame:
             return False
         
         head_x, head_y = self.snake[0]
-        
         if self.direction == 'UP':
             new_head = (head_x, head_y - 1)
         elif self.direction == 'DOWN':
@@ -48,9 +48,8 @@ class SnakeGame:
         elif self.direction == 'RIGHT':
             new_head = (head_x + 1, head_y)
         
-        # 检查碰撞
         if (new_head[0] < 0 or new_head[0] >= self.width or 
-            new_head[1] < 0 or new_head[1] >= self.height or 
+            new_head[1] < 0 or new_head[1] >= self.height or
             new_head in self.snake):
             self.game_over = True
             return False
@@ -58,46 +57,66 @@ class SnakeGame:
         self.snake.insert(0, new_head)
         self.moves_count += 1
         
-        # 检查是否吃到食物
         if new_head == self.food:
             self.score += 10
             self.food = self.generate_food()
-            
-            # 每得50分升级并增加速度
             if self.score % 50 == 0:
                 self.level += 1
-                if self.speed > 50:
-                    self.speed -= 10
+                if self.speed > 100:
+                    self.speed -= 20
             return True
         else:
             self.snake.pop()
             return False
     
-    def get_state(self):
-        return {
-            'id': self.session_id,
-            'snake': self.snake,
-            'food': self.food,
-            'score': self.score,
-            'level': self.level,
-            'direction': self.direction,
-            'game_over': self.game_over,
-            'speed': self.speed,
-            'width': self.width,
-            'height': self.height,
-            'moves_count': self.moves_count
-        }
+    def render(self, stdscr):
+        stdscr.clear()
+        board = [['  ' for _ in range(self.width)] for _ in range(self.height)]
+        for x, y in self.snake:
+            board[y][x] = '🟩'
+        food_x, food_y = self.food
+        board[food_y][food_x] = '🍎'
+
+        # 打印上边框
+        stdscr.addstr('🟥' * (self.width + 2) + '\n')
+        for row in board:
+            stdscr.addstr('🟥' + ''.join(row) + '🟥\n')
+        # 打印下边框
+        stdscr.addstr('🟥' * (self.width + 2) + '\n')
+        stdscr.addstr(f"Score: {self.score}  Level: {self.level}  Speed: {self.speed}ms\n")
+        stdscr.refresh()
     
-    def from_dict(self, data):
-        """从字典数据恢复游戏状态"""
-        self.session_id = data['id']
-        self.snake = data['snake']
-        self.food = data['food']
-        self.score = data['score']
-        self.level = data.get('level', 1)
-        self.direction = data['direction']
-        self.game_over = data['game_over']
-        self.speed = data.get('speed', 150)
-        self.width = data['width']
-        self.height = data['height']
-        self.moves_count = data.get('moves_count', 0)
+    def run(self):
+        curses.wrapper(self._main_loop)
+
+    def _main_loop(self, stdscr):
+        stdscr.nodelay(True)
+        key = curses.KEY_RIGHT
+        key_map = {
+            curses.KEY_UP: 'UP',
+            curses.KEY_DOWN: 'DOWN',
+            curses.KEY_LEFT: 'LEFT',
+            curses.KEY_RIGHT: 'RIGHT',
+            ord('w'): 'UP',
+            ord('s'): 'DOWN',
+            ord('a'): 'LEFT',
+            ord('d'): 'RIGHT'
+        }
+
+        while not self.game_over:
+            try:
+                next_key = stdscr.getch()
+                if next_key != -1:
+                    key = next_key
+                if key in key_map:
+                    self.change_direction(key_map[key])
+                
+                self.move()
+                self.render(stdscr)
+                time.sleep(self.speed / 1000.0)
+            except KeyboardInterrupt:
+                break
+        
+        stdscr.addstr("Game Over! Press any key to exit.\n")
+        stdscr.nodelay(False)
+        stdscr.getch()
