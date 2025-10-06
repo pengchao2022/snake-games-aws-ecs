@@ -1,7 +1,3 @@
-###########################################################
-# ECS + ALB + ECR 配置 (Snake Game)
-###########################################################
-
 # ------------------------
 # ECS 安全组
 # ------------------------
@@ -18,7 +14,7 @@ resource "aws_security_group" "ecs" {
     security_groups = [aws_security_group.alb.id]
   }
 
-  # ECS 容器访问外网（拉镜像、访问数据库等）
+  # ECS 容器访问外网
   egress {
     from_port   = 0
     to_port     = 0
@@ -41,7 +37,6 @@ resource "aws_security_group" "alb" {
   description = "Security group for Snake Game ALB"
   vpc_id      = aws_vpc.main.id
 
-  # 公网访问 HTTP/HTTPS
   ingress {
     from_port   = 80
     to_port     = 80
@@ -56,12 +51,12 @@ resource "aws_security_group" "alb" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  # ALB 可以访问 ECS 容器
+  # ALB 可访问外网
   egress {
-    from_port       = 0
-    to_port         = 0
-    protocol        = "-1"
-    security_groups = [aws_security_group.ecs.id]
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
   }
 
   tags = {
@@ -245,12 +240,20 @@ resource "aws_ecs_task_definition" "snake_game" {
       protocol      = "tcp"
     }]
     environment = [
-      { name = "ENVIRONMENT", value = var.environment },
-      { name = "AWS_REGION", value = var.aws_region }
+      {
+        name  = "ENVIRONMENT"
+        value = var.environment
+      },
+      {
+        name  = "AWS_REGION"
+        value = var.aws_region
+      }
     ]
     secrets = [
-      { name = "DATABASE_URL", valueFrom = aws_ssm_parameter.database_url.arn },
-      { name = "DATABASE_PASSWORD", valueFrom = aws_ssm_parameter.database_password.arn }
+      {
+        name      = "DATABASE_URL"
+        valueFrom = aws_ssm_parameter.database_url.arn
+      }
     ]
     logConfiguration = {
       logDriver = "awslogs"
@@ -316,7 +319,9 @@ resource "aws_lb" "snake_game" {
   }
 }
 
+# ------------------------
 # ALB 目标组
+# ------------------------
 resource "aws_lb_target_group" "snake_game" {
   name        = "${local.name_prefix}-tg"
   port        = 5000
@@ -328,10 +333,10 @@ resource "aws_lb_target_group" "snake_game" {
     path                = "/health"
     protocol            = "HTTP"
     timeout             = 5
-    interval            = 15
+    interval            = 30
     healthy_threshold   = 2
     unhealthy_threshold = 2
-    matcher             = "200-299"
+    matcher             = "200"
   }
 
   tags = {
@@ -340,10 +345,12 @@ resource "aws_lb_target_group" "snake_game" {
   }
 }
 
+# ------------------------
 # ALB 监听器
+# ------------------------
 resource "aws_lb_listener" "snake_game" {
   load_balancer_arn = aws_lb.snake_game.arn
-  port              = 80
+  port              = "80"
   protocol          = "HTTP"
 
   default_action {
@@ -357,7 +364,9 @@ resource "aws_lb_listener" "snake_game" {
   }
 }
 
+# ------------------------
 # CloudWatch 日志组
+# ------------------------
 resource "aws_cloudwatch_log_group" "ecs" {
   name              = "/ecs/${local.name_prefix}"
   retention_in_days = 30
@@ -369,7 +378,7 @@ resource "aws_cloudwatch_log_group" "ecs" {
 }
 
 # ------------------------
-# ECS 自动扩展策略
+# 自动扩展策略
 # ------------------------
 resource "aws_appautoscaling_target" "ecs_target" {
   max_capacity       = 4
