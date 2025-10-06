@@ -1,0 +1,168 @@
+name: Destroy Snake Game Infrastructure
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to destroy'
+        required: true
+        default: 'development'
+        type: choice
+        options:
+        - development
+        - staging
+        - production
+      confirm_destroy:
+        description: 'Type "DESTROY" to confirm infrastructure destruction'
+        required: true
+        type: string
+
+env:
+  AWS_REGION: us-east-1
+  TF_WORKING_DIR: './terraform'
+
+jobs:
+  destroy:
+    name: Destroy Infrastructure
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+
+    steps:
+    - name: Check destruction confirmation
+      if: github.event.inputs.confirm_destroy != 'DESTROY'
+      run: |
+        echo "❌ Destruction not confirmed. Please type 'DESTROY' to confirm."
+        exit 1
+
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: 1.5.0
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Create terraform.tfvars
+      run: |
+        cd ${{ env.TF_WORKING_DIR }}
+        cat > terraform.tfvars << EOF
+        aws_region = "${{ env.AWS_REGION }}"
+        environment = "${{ github.event.inputs.environment }}"
+        vpc_cidr = "10.0.0.0/16"
+        public_subnet_cidrs = ["10.0.1.0/24", "10.0.2.0/24"]
+        private_subnet_cidrs = ["10.0.101.0/24", "10.0.102.0/24"]
+        db_instance_class = "db.t3.micro"
+        db_allocated_storage = 20
+        db_engine_version = "14.9"
+        db_username = "snakegame"
+        db_name = "snakegame"
+        EOF
+
+    - name: Terraform Init
+      run: |
+        cd ${{ env.TF_WORKING_DIR }}
+        terraform init
+
+    - name: Stop ECS services
+      run: |
+        ENVIRONMENT=${{ github.event.inputs.environment }}
+        CLUSTER_NAME="snake-game-${ENVIRONMENT}-cluster"
+        SERVICE_NAME="snake-game-${ENVIRONMENT}-service"
+        
+        # 检查服务是否存在
+        if aws ecs describe-services --cluster $CLUSTER_NAME --services $SERVICE_NAME --query 'services[0].status' --output text 2>/dev/null | grep -q "ACTIVE"; then
+          echo "Stopping ECS service: $SERVICE_NAME"
+          aws ecs update-service --cluster $CLUSTER_NAME --service $SERVICE_NAME --desired-count 0
+          aws ecs wait services-inactive --cluster $CLUSTER_NAME --services $SERVICE_NAME
+          aws ecs delete-service --cluster $CLUSTER_NAME --service $SERVICE_NAME --force
+        else
+          echo "ECS service $SERVICE_NAME does not exist"
+        fi
+
+    - name: Delete ECS task definitions
+      run: |
+        ENVIRONMENT=${{ github.event.inputs.environment }}
+        TASK_FAMILY="snake-game-${ENVIRONMENT}-task"
+        
+        # 获取所有该family的任务定义
+        TASK_DEFS=$(aws ecs list-task-definitions --family-prefix $TASK_FAMILY --query 'taskDefinitionArns' --output text)
+        
+        if [ -n "$TASK_DEFS" ]; then
+          echo "Deregistering task definitions for family: $TASK_FAMILY"
+          for TASK_DEF in $TASK_DEFS; do
+            echo "Deregistering: $TASK_DEF"
+            aws ecs deregister-task-definition --task-definition $TASK_DEF
+          done
+        else
+          echo "No task definitions found for family: $TASK_FAMILY"
+        fi
+
+    - name: Terraform Destroy
+      run: |
+        cd ${{ env.TF_WORKING_DIR }}
+        terraform destroy -auto-approve -var="db_password=${{ secrets.DB_PASSWORD }}"
+
+    - name: Clean up ECR images
+      run: |
+        REPOSITORY_NAME="snake-game"
+        
+        # 检查仓库是否存在
+        if aws ecr describe-repositories --repository-names $REPOSITORY_NAME --region ${{ env.AWS_REGION }} > /dev/null 2>&1; then
+          echo "Cleaning up ECR repository: $REPOSITORY_NAME"
+          
+          # 获取所有镜像digest
+          IMAGE_DIGESTS=$(aws ecr list-images --repository-name $REPOSITORY_NAME --region ${{ env.AWS_REGION }} --query 'imageIds[].imageDigest' --output text)
+          
+          if [ -n "$IMAGE_DIGESTS" ]; then
+            for digest in $IMAGE_DIGESTS; do
+              echo "Deleting image: $digest"
+              aws ecr batch-delete-image \
+                --repository-name $REPOSITORY_NAME \
+                --image-ids imageDigest=$digest \
+                --region ${{ env.AWS_REGION }}
+            done
+            echo "Deleted all images from ECR repository"
+          else
+            echo "No images found in ECR repository"
+          fi
+        else
+          echo "ECR repository $REPOSITORY_NAME does not exist"
+        fi
+
+    - name: Clean up CloudWatch log groups
+      run: |
+        # 删除与项目相关的CloudWatch日志组
+        LOG_GROUPS=$(aws logs describe-log-groups --log-group-name-prefix "/ecs/snake-game" --query 'logGroups[].logGroupName' --output text)
+        
+        if [ -n "$LOG_GROUPS" ]; then
+          echo "Deleting CloudWatch log groups"
+          for LOG_GROUP in $LOG_GROUPS; do
+            echo "Deleting log group: $LOG_GROUP"
+            aws logs delete-log-group --log-group-name $LOG_GROUP
+          done
+        else
+          echo "No CloudWatch log groups found"
+        fi
+
+    - name: Send destruction notification
+      run: |
+        echo "✅ Infrastructure for environment '${{ github.event.inputs.environment }}' has been destroyed successfully"
+        echo ""
+        echo "📝 Cleanup Summary:"
+        echo "   - Terraform resources: ✅ Destroyed"
+        echo "   - ECS services: ✅ Stopped and deleted"
+        echo "   - ECS task definitions: ✅ Deregistered"
+        echo "   - ECR images: ✅ Cleaned up"
+        echo "   - CloudWatch logs: ✅ Deleted"
+        echo ""
+        echo "⚠️  Note: The following resources may need manual cleanup:"
+        echo "   - S3 state bucket: snake-game-terraform-state"
+        echo "   - IAM roles (if not managed by Terraform)"
+        echo "   - SSM parameters (if not managed by Terraform)"
