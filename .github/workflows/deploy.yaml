@@ -1,39 +1,22 @@
-name: Destroy Snake Game Infrastructure
+name: Deploy Snake Game to AWS
 
 on:
-  workflow_dispatch:
-    inputs:
-      environment:
-        description: 'Environment to destroy'
-        required: true
-        default: 'development'
-        type: choice
-        options:
-        - development
-        - staging
-        - production
-      confirm_destroy:
-        description: 'Type "DESTROY" to confirm infrastructure destruction'
-        required: true
-        type: string
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
 
 env:
   AWS_REGION: us-east-1
   TF_WORKING_DIR: './terraform'
 
 jobs:
-  destroy:
-    name: Destroy Infrastructure
+  terraform-plan:
+    name: Terraform Plan
     runs-on: ubuntu-latest
-    environment: ${{ github.event.inputs.environment }}
-
+    environment: ${{ github.ref == 'refs/heads/main' && 'production' || 'development' }}
+    
     steps:
-    - name: Check destruction confirmation
-      if: github.event.inputs.confirm_destroy != 'DESTROY'
-      run: |
-        echo "❌ Destruction not confirmed. Please type 'DESTROY' to confirm."
-        exit 1
-
     - name: Checkout
       uses: actions/checkout@v4
 
@@ -54,7 +37,7 @@ jobs:
         cd ${{ env.TF_WORKING_DIR }}
         cat > terraform.tfvars << EOF
         aws_region = "${{ env.AWS_REGION }}"
-        environment = "${{ github.event.inputs.environment }}"
+        environment = "${{ github.ref == 'refs/heads/main' && 'production' || 'development' }}"
         vpc_cidr = "10.0.0.0/16"
         public_subnet_cidrs = ["10.0.1.0/24", "10.0.2.0/24"]
         private_subnet_cidrs = ["10.0.101.0/24", "10.0.102.0/24"]
@@ -70,99 +53,285 @@ jobs:
         cd ${{ env.TF_WORKING_DIR }}
         terraform init
 
-    - name: Stop ECS services
-      run: |
-        ENVIRONMENT=${{ github.event.inputs.environment }}
-        CLUSTER_NAME="snake-game-${ENVIRONMENT}-cluster"
-        SERVICE_NAME="snake-game-${ENVIRONMENT}-service"
-        
-        # 检查服务是否存在
-        if aws ecs describe-services --cluster $CLUSTER_NAME --services $SERVICE_NAME --query 'services[0].status' --output text 2>/dev/null | grep -q "ACTIVE"; then
-          echo "Stopping ECS service: $SERVICE_NAME"
-          aws ecs update-service --cluster $CLUSTER_NAME --service $SERVICE_NAME --desired-count 0
-          aws ecs wait services-inactive --cluster $CLUSTER_NAME --services $SERVICE_NAME
-          aws ecs delete-service --cluster $CLUSTER_NAME --service $SERVICE_NAME --force
-        else
-          echo "ECS service $SERVICE_NAME does not exist"
-        fi
-
-    - name: Delete ECS task definitions
-      run: |
-        ENVIRONMENT=${{ github.event.inputs.environment }}
-        TASK_FAMILY="snake-game-${ENVIRONMENT}-task"
-        
-        # 获取所有该family的任务定义
-        TASK_DEFS=$(aws ecs list-task-definitions --family-prefix $TASK_FAMILY --query 'taskDefinitionArns' --output text)
-        
-        if [ -n "$TASK_DEFS" ]; then
-          echo "Deregistering task definitions for family: $TASK_FAMILY"
-          for TASK_DEF in $TASK_DEFS; do
-            echo "Deregistering: $TASK_DEF"
-            aws ecs deregister-task-definition --task-definition $TASK_DEF
-          done
-        else
-          echo "No task definitions found for family: $TASK_FAMILY"
-        fi
-
-    - name: Terraform Destroy
+    - name: Terraform Format
       run: |
         cd ${{ env.TF_WORKING_DIR }}
-        terraform destroy -auto-approve -var="db_password=${{ secrets.DB_PASSWORD }}"
+        terraform fmt -check
 
-    - name: Clean up ECR images
+    - name: Terraform Validate
       run: |
-        REPOSITORY_NAME="snake-game"
+        cd ${{ env.TF_WORKING_DIR }}
+        terraform validate
+
+    - name: Terraform Plan
+      id: plan
+      run: |
+        cd ${{ env.TF_WORKING_DIR }}
+        terraform plan -var="db_password=${{ secrets.DB_PASSWORD }}" -out=tfplan
+
+    - name: Upload Terraform Plan
+      uses: actions/upload-artifact@v4
+      with:
+        name: terraform-plan
+        path: ${{ env.TF_WORKING_DIR }}/tfplan
+
+  terraform-apply:
+    name: Terraform Apply
+    runs-on: ubuntu-latest
+    environment: production
+    needs: terraform-plan
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: 1.5.0
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Create terraform.tfvars
+      run: |
+        cd ${{ env.TF_WORKING_DIR }}
+        cat > terraform.tfvars << EOF
+        aws_region = "${{ env.AWS_REGION }}"
+        environment = "production"
+        vpc_cidr = "10.0.0.0/16"
+        public_subnet_cidrs = ["10.0.1.0/24", "10.0.2.0/24"]
+        private_subnet_cidrs = ["10.0.101.0/24", "10.0.102.0/24"]
+        db_instance_class = "db.t3.micro"
+        db_allocated_storage = 20
+        db_engine_version = "14.9"
+        db_username = "snakegame"
+        db_name = "snakegame"
+        EOF
+
+    - name: Download Terraform Plan
+      uses: actions/download-artifact@v4
+      with:
+        name: terraform-plan
+        path: ${{ env.TF_WORKING_DIR }}
+
+    - name: Terraform Init
+      run: |
+        cd ${{ env.TF_WORKING_DIR }}
+        terraform init
+
+    - name: Terraform Apply
+      run: |
+        cd ${{ env.TF_WORKING_DIR }}
+        terraform apply -auto-approve tfplan
+
+    - name: Output deployment info
+      run: |
+        cd ${{ env.TF_WORKING_DIR }}
+        terraform output -json > outputs.json
+        echo "RDS Endpoint: $(jq -r '.rds_endpoint.value' outputs.json)"
+        echo "Database URL SSM: $(jq -r '.database_url_ssm_parameter.value' outputs.json)"
+        echo "Load Balancer DNS: $(jq -r '.load_balancer_dns.value' outputs.json)"
+        echo "ECS Cluster: $(jq -r '.ecs_cluster_name.value' outputs.json)"
+
+  deploy-app:
+    name: Deploy Application
+    runs-on: ubuntu-latest
+    needs: terraform-apply
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production
+
+    env:
+      ECR_REPOSITORY: snake-game
+      ECS_SERVICE: snake-game-service
+      ECS_CLUSTER: snake-game-cluster
+      ECS_TASK_DEFINITION: snake-game-task
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Build, tag, and push image to Amazon ECR
+      id: build-image
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        IMAGE_TAG: ${{ github.sha }}
+      run: |
+        cd src
+        # 使用Alpine Linux基础的Dockerfile避免构建错误
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+        echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+    - name: Get Terraform outputs
+      id: tf-outputs
+      run: |
+        cd ${{ env.TF_WORKING_DIR }}
+        EXECUTION_ROLE_ARN=$(aws iam list-roles --query "Roles[?RoleName=='snake-game-production-ecs-task-execution-role'].Arn" --output text)
+        TASK_ROLE_ARN=$(aws iam list-roles --query "Roles[?RoleName=='snake-game-production-ecs-task-role'].Arn" --output text)
+        DATABASE_URL_SSM=$(terraform output -raw database_url_ssm_parameter)
+        CLOUDWATCH_GROUP=$(terraform output -raw ecs_cluster_name | sed 's/-cluster$//')
         
-        # 检查仓库是否存在
-        if aws ecr describe-repositories --repository-names $REPOSITORY_NAME --region ${{ env.AWS_REGION }} > /dev/null 2>&1; then
-          echo "Cleaning up ECR repository: $REPOSITORY_NAME"
+        echo "execution_role_arn=$EXECUTION_ROLE_ARN" >> $GITHUB_OUTPUT
+        echo "task_role_arn=$TASK_ROLE_ARN" >> $GITHUB_OUTPUT
+        echo "database_url_ssm=$DATABASE_URL_SSM" >> $GITHUB_OUTPUT
+        echo "cloudwatch_group=/ecs/$CLOUDWATCH_GROUP" >> $GITHUB_OUTPUT
+
+    - name: Create task definition
+      id: task-def
+      run: |
+        # 创建任务定义JSON文件
+        cat > task-definition.json << EOF
+        {
+          "family": "$ECS_TASK_DEFINITION",
+          "networkMode": "awsvpc",
+          "requiresCompatibilities": ["FARGATE"],
+          "cpu": "256",
+          "memory": "512",
+          "executionRoleArn": "${{ steps.tf-outputs.outputs.execution_role_arn }}",
+          "taskRoleArn": "${{ steps.tf-outputs.outputs.task_role_arn }}",
+          "containerDefinitions": [
+            {
+              "name": "snake-game",
+              "image": "${{ steps.build-image.outputs.image }}",
+              "essential": true,
+              "portMappings": [
+                {
+                  "containerPort": 5000,
+                  "hostPort": 5000,
+                  "protocol": "tcp"
+                }
+              ],
+              "environment": [
+                {
+                  "name": "ENVIRONMENT",
+                  "value": "production"
+                },
+                {
+                  "name": "AWS_REGION",
+                  "value": "${{ env.AWS_REGION }}"
+                }
+              ],
+              "secrets": [
+                {
+                  "name": "DATABASE_URL",
+                  "valueFrom": "${{ steps.tf-outputs.outputs.database_url_ssm }}"
+                }
+              ],
+              "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                  "awslogs-group": "${{ steps.tf-outputs.outputs.cloudwatch_group }}",
+                  "awslogs-region": "${{ env.AWS_REGION }}",
+                  "awslogs-stream-prefix": "ecs"
+                }
+              }
+            }
+          ]
+        }
+        EOF
+        
+        echo "Task definition created:"
+        cat task-definition.json
+
+    - name: Register ECS task definition
+      run: |
+        aws ecs register-task-definition --cli-input-json file://task-definition.json
+        echo "Task definition registered successfully"
+
+    - name: Deploy to ECS service
+      run: |
+        # 检查服务是否存在，如果不存在则创建
+        if aws ecs describe-services --cluster $ECS_CLUSTER --services $ECS_SERVICE --query 'services[0].status' --output text | grep -q "ACTIVE"; then
+          echo "Updating existing service: $ECS_SERVICE"
+          aws ecs update-service \
+            --cluster $ECS_CLUSTER \
+            --service $ECS_SERVICE \
+            --task-definition $ECS_TASK_DEFINITION \
+            --force-new-deployment
+        else
+          echo "Service $ECS_SERVICE does not exist, creating new service"
+          # 从Terraform获取必要信息
+          cd ${{ env.TF_WORKING_DIR }}
+          LOAD_BALANCER_ARN=$(aws elbv2 describe-load-balancers --query "LoadBalancers[?LoadBalancerName=='snake-game-production-alb'].LoadBalancerArn" --output text)
+          TARGET_GROUP_ARN=$(aws elbv2 describe-target-groups --query "TargetGroups[?TargetGroupName=='snake-game-production-tg'].TargetGroupArn" --output text)
+          SUBNETS=$(terraform output -json private_subnet_ids | jq -r '. | join(",")')
+          SECURITY_GROUPS=$(aws ec2 describe-security-groups --filters "Name=group-name,Values=snake-game-production-ecs-sg" --query "SecurityGroups[0].GroupId" --output text)
           
-          # 获取所有镜像digest
-          IMAGE_DIGESTS=$(aws ecr list-images --repository-name $REPOSITORY_NAME --region ${{ env.AWS_REGION }} --query 'imageIds[].imageDigest' --output text)
-          
-          if [ -n "$IMAGE_DIGESTS" ]; then
-            for digest in $IMAGE_DIGESTS; do
-              echo "Deleting image: $digest"
-              aws ecr batch-delete-image \
-                --repository-name $REPOSITORY_NAME \
-                --image-ids imageDigest=$digest \
-                --region ${{ env.AWS_REGION }}
-            done
-            echo "Deleted all images from ECR repository"
+          aws ecs create-service \
+            --cluster $ECS_CLUSTER \
+            --service-name $ECS_SERVICE \
+            --task-definition $ECS_TASK_DEFINITION \
+            --desired-count 1 \
+            --launch-type FARGATE \
+            --network-configuration "awsvpcConfiguration={subnets=[$SUBNETS],securityGroups=[$SECURITY_GROUPS],assignPublicIp=DISABLED}" \
+            --load-balancers "targetGroupArn=$TARGET_GROUP_ARN,containerName=snake-game,containerPort=5000"
+        fi
+
+    - name: Wait for service stability
+      run: |
+        echo "Waiting for service to become stable..."
+        aws ecs wait services-stable \
+          --cluster $ECS_CLUSTER \
+          --services $ECS_SERVICE
+        echo "Service is now stable"
+
+    - name: Health Check
+      run: |
+        echo "Waiting for application to start..."
+        sleep 60
+        
+        # 获取负载均衡器DNS
+        cd ${{ env.TF_WORKING_DIR }}
+        LOAD_BALANCER_DNS=$(terraform output -raw load_balancer_dns)
+        
+        echo "Testing application health at: http://$LOAD_BALANCER_DNS/health"
+        
+        # 重试机制
+        for i in {1..10}; do
+          if curl -f -s http://$LOAD_BALANCER_DNS/health; then
+            echo "Health check passed!"
+            break
           else
-            echo "No images found in ECR repository"
+            echo "Health check attempt $i failed, retrying in 15 seconds..."
+            sleep 15
           fi
-        else
-          echo "ECR repository $REPOSITORY_NAME does not exist"
-        fi
+          
+          if [ $i -eq 10 ]; then
+            echo "Health check failed after 10 attempts"
+            # 获取服务事件以帮助调试
+            aws ecs describe-services --cluster $ECS_CLUSTER --services $ECS_SERVICE --query 'services[0].events[0:5]'
+            exit 1
+          fi
+        done
 
-    - name: Clean up CloudWatch log groups
+    - name: Deployment Summary
       run: |
-        # 删除与项目相关的CloudWatch日志组
-        LOG_GROUPS=$(aws logs describe-log-groups --log-group-name-prefix "/ecs/snake-game" --query 'logGroups[].logGroupName' --output text)
+        cd ${{ env.TF_WORKING_DIR }}
+        LOAD_BALANCER_DNS=$(terraform output -raw load_balancer_dns)
+        RDS_ENDPOINT=$(terraform output -raw rds_endpoint)
         
-        if [ -n "$LOG_GROUPS" ]; then
-          echo "Deleting CloudWatch log groups"
-          for LOG_GROUP in $LOG_GROUPS; do
-            echo "Deleting log group: $LOG_GROUP"
-            aws logs delete-log-group --log-group-name $LOG_GROUP
-          done
-        else
-          echo "No CloudWatch log groups found"
-        fi
-
-    - name: Send destruction notification
-      run: |
-        echo "✅ Infrastructure for environment '${{ github.event.inputs.environment }}' has been destroyed successfully"
-        echo ""
-        echo "📝 Cleanup Summary:"
-        echo "   - Terraform resources: ✅ Destroyed"
-        echo "   - ECS services: ✅ Stopped and deleted"
-        echo "   - ECS task definitions: ✅ Deregistered"
-        echo "   - ECR images: ✅ Cleaned up"
-        echo "   - CloudWatch logs: ✅ Deleted"
-        echo ""
-        echo "⚠️  Note: The following resources may need manual cleanup:"
-        echo "   - S3 state bucket: snake-game-terraform-state"
-        echo "   - IAM roles (if not managed by Terraform)"
-        echo "   - SSM parameters (if not managed by Terraform)"
+        echo "🚀 Deployment Completed Successfully!"
+        echo "=========================================="
+        echo "🌐 Application URL: http://$LOAD_BALANCER_DNS"
+        echo "🛠️  Health Check: http://$LOAD_BALANCER_DNS/health"
+        echo "🗄️  Database Endpoint: $RDS_ENDPOINT"
+        echo "🐳 ECR Image: ${{ steps.build-image.outputs.image }}"
+        echo "⚓ ECS Cluster: $ECS_CLUSTER"
+        echo "🔧 ECS Service: $ECS_SERVICE"
