@@ -6,6 +6,10 @@ on:
 
 env:
   AWS_REGION: us-east-1
+  ECR_REPOSITORY: snake-game
+  ECS_CLUSTER: snake-game-production-cluster
+  ECS_SERVICE: snake-game-service
+  ECS_TASK_FAMILY: snake-game-task
 
 jobs:
   terraform:
@@ -37,22 +41,6 @@ jobs:
         cd terraform
         terraform apply -auto-approve -var="db_password=${{ secrets.DB_PASSWORD }}"
 
-    - name: Get ECR repository URL
-      id: get-ecr-url
-      run: |
-        cd terraform
-        ECR_URL=$(terraform output -raw ecr_repository_url)
-        echo "ECR_URL=$ECR_URL" >> $GITHUB_OUTPUT
-        echo "ECR repository URL: $ECR_URL"
-
-    - name: Get ECS task execution role ARN
-      id: get-role-arn
-      run: |
-        cd terraform
-        TASK_EXEC_ROLE_ARN=$(terraform output -raw ecs_task_execution_role_arn)
-        echo "TASK_EXEC_ROLE_ARN=$TASK_EXEC_ROLE_ARN" >> $GITHUB_OUTPUT
-        echo "Task execution role ARN: $TASK_EXEC_ROLE_ARN"
-
   deploy-app:
     name: Deploy Application
     runs-on: ubuntu-latest
@@ -74,46 +62,122 @@ jobs:
       id: login-ecr
       uses: aws-actions/amazon-ecr-login@v2
 
-    - name: Build and push Docker image
+    - name: Get AWS Account ID
+      id: account
+      run: |
+        ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+        echo "ACCOUNT_ID=$ACCOUNT_ID" >> $GITHUB_ENV
+        echo "Account ID: $ACCOUNT_ID"
+
+    - name: Build Docker image
       run: |
         cd src
-        # 先构建镜像
-        docker build -t snake-game:latest .
-        
-        # 然后使用正确的ECR URL进行标记和推送
-        ECR_URL="${{ needs.terraform.outputs.ECR_URL }}"
-        echo "Pushing to ECR: $ECR_URL:latest"
-        
-        docker tag snake-game:latest $ECR_URL:latest
-        docker push $ECR_URL:latest
+        docker build -t ${{ env.ECR_REPOSITORY }}:${{ github.sha }} .
 
-    - name: Update task definition with correct values
+    - name: Push Docker image to ECR
       run: |
-        # 使用正确的角色ARN和镜像URL更新任务定义
-        ECR_URL="${{ needs.terraform.outputs.ECR_URL }}"
-        ROLE_ARN="${{ needs.terraform.outputs.TASK_EXEC_ROLE_ARN }}"
+        ECR_REGISTRY=${{ steps.login-ecr.outputs.registry }}
+        ECR_IMAGE="$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ github.sha }}"
         
-        echo "Using ECR URL: $ECR_URL"
-        echo "Using Role ARN: $ROLE_ARN"
+        echo "Pushing to ECR: $ECR_IMAGE"
         
-        jq \
-          --arg image "$ECR_URL:latest" \
-          --arg role_arn "$ROLE_ARN" \
-          '.containerDefinitions[0].image = $image | .executionRoleArn = $role_arn' \
-          task-definition.json > updated-task-definition.json
+        docker tag ${{ env.ECR_REPOSITORY }}:${{ github.sha }} $ECR_IMAGE
+        docker push $ECR_IMAGE
         
-        echo "Updated task definition created"
+        echo "ECR_IMAGE=$ECR_IMAGE" >> $GITHUB_ENV
+
+    - name: Get RDS connection info
+      id: rds-info
+      run: |
+        cd terraform
+        RDS_ENDPOINT=$(terraform output -raw rds_endpoint)
+        DB_USERNAME=$(terraform output -raw db_username)
+        DB_NAME=$(terraform output -raw db_name)
+        
+        echo "RDS_ENDPOINT=$RDS_ENDPOINT" >> $GITHUB_ENV
+        echo "DB_USERNAME=$DB_USERNAME" >> $GITHUB_ENV
+        echo "DB_NAME=$DB_NAME" >> $GITHUB_ENV
+
+    - name: Get ECS task execution role
+      id: ecs-role
+      run: |
+        # 查找ECS任务执行角色
+        TASK_EXEC_ROLE_ARN=$(aws iam list-roles --query "Roles[?contains(RoleName, 'ecsTaskExecutionRole')].Arn" --output text | head -1)
+        
+        if [ -z "$TASK_EXEC_ROLE_ARN" ]; then
+          # 如果找不到，使用默认角色名称
+          TASK_EXEC_ROLE_ARN="arn:aws:iam::${{ env.ACCOUNT_ID }}:role/ecsTaskExecutionRole"
+        fi
+        
+        echo "TASK_EXEC_ROLE_ARN=$TASK_EXEC_ROLE_ARN" >> $GITHUB_ENV
+        echo "Using ECS task execution role: $TASK_EXEC_ROLE_ARN"
+
+    - name: Create task definition from template
+      run: |
+        # 构建数据库连接字符串
+        DATABASE_URL="postgresql://${{ env.DB_USERNAME }}:${{ secrets.DB_PASSWORD }}@${{ env.RDS_ENDPOINT }}/${{ env.DB_NAME }}"
+        
+        # 创建任务定义
+        cat > task-definition.json << EOF
+        {
+          "family": "${{ env.ECS_TASK_FAMILY }}",
+          "networkMode": "awsvpc",
+          "requiresCompatibilities": ["FARGATE"],
+          "cpu": "256",
+          "memory": "512",
+          "executionRoleArn": "${{ env.TASK_EXEC_ROLE_ARN }}",
+          "containerDefinitions": [
+            {
+              "name": "snake-game",
+              "image": "${{ env.ECR_IMAGE }}",
+              "essential": true,
+              "portMappings": [
+                {
+                  "containerPort": 5000,
+                  "hostPort": 5000,
+                  "protocol": "tcp"
+                }
+              ],
+              "environment": [
+                {
+                  "name": "DATABASE_URL",
+                  "value": "$DATABASE_URL"
+                },
+                {
+                  "name": "ENVIRONMENT",
+                  "value": "production"
+                },
+                {
+                  "name": "AWS_REGION",
+                  "value": "${{ env.AWS_REGION }}"
+                }
+              ],
+              "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                  "awslogs-group": "/ecs/${{ env.ECS_CLUSTER }}",
+                  "awslogs-region": "${{ env.AWS_REGION }}",
+                  "awslogs-stream-prefix": "ecs"
+                }
+              }
+            }
+          ]
+        }
+        EOF
+        
+        echo "Task definition created successfully"
+        cat task-definition.json
 
     - name: Register ECS task definition
       run: |
-        aws ecs register-task-definition --cli-input-json file://updated-task-definition.json
+        aws ecs register-task-definition --cli-input-json file://task-definition.json
 
     - name: Update ECS service
       run: |
         aws ecs update-service \
-          --cluster snake-game-production-cluster \
-          --service snake-game-service \
-          --task-definition snake-game-task \
+          --cluster ${{ env.ECS_CLUSTER }} \
+          --service ${{ env.ECS_SERVICE }} \
+          --task-definition ${{ env.ECS_TASK_FAMILY }} \
           --force-new-deployment
 
     - name: Wait for deployment
@@ -121,8 +185,8 @@ jobs:
         echo "Waiting for deployment to complete..."
         sleep 30
         aws ecs wait services-stable \
-          --cluster snake-game-production-cluster \
-          --services snake-game-service
+          --cluster ${{ env.ECS_CLUSTER }} \
+          --services ${{ env.ECS_SERVICE }}
 
     - name: Health check
       run: |
@@ -135,7 +199,7 @@ jobs:
         echo "Testing health endpoint..."
         
         # 健康检查
-        for i in {1..10}; do
+        for i in {1..15}; do
           if curl -f -s http://$LOAD_BALANCER_DNS/health > /dev/null; then
             echo "✅ Health check passed!"
             break
@@ -155,6 +219,6 @@ jobs:
         echo "========================================"
         echo "🌐 Application URL: http://$LOAD_BALANCER_DNS"
         echo "🛠️  Health Check: http://$LOAD_BALANCER_DNS/health"
-        echo "🐳 ECR Image: ${{ needs.terraform.outputs.ECR_URL }}:latest"
-        echo "⚓ ECS Cluster: snake-game-production-cluster"
-        echo "🔧 ECS Service: snake-game-service"
+        echo "🐳 ECR Image: ${{ env.ECR_IMAGE }}"
+        echo "⚓ ECS Cluster: ${{ env.ECS_CLUSTER }}"
+        echo "🔧 ECS Service: ${{ env.ECS_SERVICE }}"
