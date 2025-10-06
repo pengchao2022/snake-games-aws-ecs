@@ -32,22 +32,6 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
 
-    - name: Create terraform.tfvars
-      run: |
-        cd ${{ env.TF_WORKING_DIR }}
-        cat > terraform.tfvars << EOF
-        aws_region = "${{ env.AWS_REGION }}"
-        environment = "${{ github.ref == 'refs/heads/main' && 'production' || 'development' }}"
-        vpc_cidr = "10.0.0.0/16"
-        public_subnet_cidrs = ["10.0.1.0/24", "10.0.2.0/24"]
-        private_subnet_cidrs = ["10.0.101.0/24", "10.0.102.0/24"]
-        db_instance_class = "db.t3.micro"
-        db_allocated_storage = 20
-        db_engine_version = "14.9"
-        db_username = "snakegame"
-        db_name = "snakegame"
-        EOF
-
     - name: Terraform Init
       run: |
         cd ${{ env.TF_WORKING_DIR }}
