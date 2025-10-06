@@ -10,12 +10,6 @@ terraform {
       version = "~> 3.0"
     }
   }
-
-  backend "s3" {
-    bucket = "snake-game-terraform-state"
-    key    = "snake-game/terraform.tfstate"
-    region = "us-east-1"
-  }
 }
 
 provider "aws" {
