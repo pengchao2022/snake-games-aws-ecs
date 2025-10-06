@@ -19,7 +19,7 @@ class SnakeGame:
         self.score = 0
         self.level = 1
         self.game_over = False
-        self.speed = 150  # 移动速度（毫秒）
+        self.speed = 400  # 移动速度（毫秒）
         self.moves_count = 0
     
     def generate_food(self):
