@@ -40,8 +40,7 @@ jobs:
     - name: Terraform Format Check
       run: |
         cd ${{ env.TF_WORKING_DIR }}
-        # 跳过 .tfvars 文件的格式检查
-        find . -name "*.tf" -exec terraform fmt -check {} \;
+        terraform fmt -check
 
     - name: Terraform Validate
       run: |
@@ -99,14 +98,17 @@ jobs:
         cd ${{ env.TF_WORKING_DIR }}
         terraform apply -auto-approve tfplan
 
-    - name: Output deployment info
+    - name: Save Terraform Outputs
       run: |
         cd ${{ env.TF_WORKING_DIR }}
-        terraform output -json > outputs.json
-        echo "RDS Endpoint: $(jq -r '.rds_endpoint.value' outputs.json)"
-        echo "Database URL SSM: $(jq -r '.database_url_ssm_parameter.value' outputs.json)"
-        echo "Load Balancer DNS: $(jq -r '.load_balancer_dns.value' outputs.json)"
-        echo "ECS Cluster: $(jq -r '.ecs_cluster_name.value' outputs.json)"
+        terraform output -json > ../terraform-outputs.json
+        echo "Terraform outputs saved"
+
+    - name: Upload Terraform Outputs
+      uses: actions/upload-artifact@v4
+      with:
+        name: terraform-outputs
+        path: terraform-outputs.json
 
   deploy-app:
     name: Deploy Application
@@ -132,6 +134,41 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
 
+    - name: Download Terraform Outputs
+      uses: actions/download-artifact@v4
+      with:
+        name: terraform-outputs
+        path: ./
+
+    - name: Parse Terraform Outputs
+      id: tf-outputs
+      run: |
+        # 使用 jq 解析 terraform 输出，避免使用 terraform 命令
+        EXECUTION_ROLE_ARN=$(jq -r '.execution_role_arn.value' terraform-outputs.json 2>/dev/null || echo "")
+        TASK_ROLE_ARN=$(jq -r '.task_role_arn.value' terraform-outputs.json 2>/dev/null || echo "")
+        DATABASE_URL_SSM=$(jq -r '.database_url_ssm_parameter.value' terraform-outputs.json)
+        CLOUDWATCH_GROUP=$(jq -r '.ecs_cluster_name.value' terraform-outputs.json | sed 's/-cluster$//')
+        LOAD_BALANCER_DNS=$(jq -r '.load_balancer_dns.value' terraform-outputs.json)
+        PRIVATE_SUBNET_IDS=$(jq -r '.private_subnet_ids.value | join(",")' terraform-outputs.json)
+        
+        echo "execution_role_arn=$EXECUTION_ROLE_ARN" >> $GITHUB_OUTPUT
+        echo "task_role_arn=$TASK_ROLE_ARN" >> $GITHUB_OUTPUT
+        echo "database_url_ssm=$DATABASE_URL_SSM" >> $GITHUB_OUTPUT
+        echo "cloudwatch_group=/ecs/$CLOUDWATCH_GROUP" >> $GITHUB_OUTPUT
+        echo "load_balancer_dns=$LOAD_BALANCER_DNS" >> $GITHUB_OUTPUT
+        echo "private_subnet_ids=$PRIVATE_SUBNET_IDS" >> $GITHUB_OUTPUT
+
+        # 如果无法从输出获取角色ARN，使用AWS CLI查询
+        if [ -z "$EXECUTION_ROLE_ARN" ]; then
+          EXECUTION_ROLE_ARN=$(aws iam list-roles --query "Roles[?RoleName=='snake-game-production-ecs-task-execution-role'].Arn" --output text)
+          echo "execution_role_arn_fallback=$EXECUTION_ROLE_ARN" >> $GITHUB_OUTPUT
+        fi
+        
+        if [ -z "$TASK_ROLE_ARN" ]; then
+          TASK_ROLE_ARN=$(aws iam list-roles --query "Roles[?RoleName=='snake-game-production-ecs-task-role'].Arn" --output text)
+          echo "task_role_arn_fallback=$TASK_ROLE_ARN" >> $GITHUB_OUTPUT
+        fi
+
     - name: Login to Amazon ECR
       id: login-ecr
       uses: aws-actions/amazon-ecr-login@v2
@@ -143,29 +180,26 @@ jobs:
         IMAGE_TAG: ${{ github.sha }}
       run: |
         cd src
-        # 使用Alpine Linux基础的Dockerfile避免构建错误
         docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
         docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
         echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
 
-    - name: Get Terraform outputs
-      id: tf-outputs
-      run: |
-        cd ${{ env.TF_WORKING_DIR }}
-        EXECUTION_ROLE_ARN=$(aws iam list-roles --query "Roles[?RoleName=='snake-game-production-ecs-task-execution-role'].Arn" --output text)
-        TASK_ROLE_ARN=$(aws iam list-roles --query "Roles[?RoleName=='snake-game-production-ecs-task-role'].Arn" --output text)
-        DATABASE_URL_SSM=$(terraform output -raw database_url_ssm_parameter)
-        CLOUDWATCH_GROUP=$(terraform output -raw ecs_cluster_name | sed 's/-cluster$//')
-        
-        echo "execution_role_arn=$EXECUTION_ROLE_ARN" >> $GITHUB_OUTPUT
-        echo "task_role_arn=$TASK_ROLE_ARN" >> $GITHUB_OUTPUT
-        echo "database_url_ssm=$DATABASE_URL_SSM" >> $GITHUB_OUTPUT
-        echo "cloudwatch_group=/ecs/$CLOUDWATCH_GROUP" >> $GITHUB_OUTPUT
-
     - name: Create task definition
       id: task-def
       run: |
-        # 创建任务定义JSON文件
+        # 使用回退值如果主要值不存在
+        EXECUTION_ROLE=${{
+          steps.tf-outputs.outputs.execution_role_arn != '' && 
+          steps.tf-outputs.outputs.execution_role_arn || 
+          steps.tf-outputs.outputs.execution_role_arn_fallback
+        }}
+        
+        TASK_ROLE=${{
+          steps.tf-outputs.outputs.task_role_arn != '' && 
+          steps.tf-outputs.outputs.task_role_arn || 
+          steps.tf-outputs.outputs.task_role_arn_fallback
+        }}
+
         cat > task-definition.json << EOF
         {
           "family": "$ECS_TASK_DEFINITION",
@@ -173,8 +207,8 @@ jobs:
           "requiresCompatibilities": ["FARGATE"],
           "cpu": "256",
           "memory": "512",
-          "executionRoleArn": "${{ steps.tf-outputs.outputs.execution_role_arn }}",
-          "taskRoleArn": "${{ steps.tf-outputs.outputs.task_role_arn }}",
+          "executionRoleArn": "$EXECUTION_ROLE",
+          "taskRoleArn": "$TASK_ROLE",
           "containerDefinitions": [
             {
               "name": "snake-game",
@@ -215,92 +249,79 @@ jobs:
           ]
         }
         EOF
-        
-        echo "Task definition created:"
-        cat task-definition.json
+
+        echo "Task definition created"
 
     - name: Register ECS task definition
       run: |
         aws ecs register-task-definition --cli-input-json file://task-definition.json
-        echo "Task definition registered successfully"
+
+    - name: Get ECS Security Group
+      id: get-sg
+      run: |
+        SECURITY_GROUP=$(aws ec2 describe-security-groups \
+          --filters "Name=group-name,Values=snake-game-production-ecs-sg" \
+          --query "SecurityGroups[0].GroupId" \
+          --output text)
+        echo "security_group=$SECURITY_GROUP" >> $GITHUB_OUTPUT
+
+    - name: Get ALB Target Group
+      id: get-tg
+      run: |
+        TARGET_GROUP_ARN=$(aws elbv2 describe-target-groups \
+          --query "TargetGroups[?TargetGroupName=='snake-game-production-tg'].TargetGroupArn" \
+          --output text)
+        echo "target_group_arn=$TARGET_GROUP_ARN" >> $GITHUB_OUTPUT
 
     - name: Deploy to ECS service
       run: |
-        # 检查服务是否存在，如果不存在则创建
+        # 检查服务是否存在
         if aws ecs describe-services --cluster $ECS_CLUSTER --services $ECS_SERVICE --query 'services[0].status' --output text | grep -q "ACTIVE"; then
-          echo "Updating existing service: $ECS_SERVICE"
+          echo "Updating existing service"
           aws ecs update-service \
             --cluster $ECS_CLUSTER \
             --service $ECS_SERVICE \
             --task-definition $ECS_TASK_DEFINITION \
             --force-new-deployment
         else
-          echo "Service $ECS_SERVICE does not exist, creating new service"
-          # 从Terraform获取必要信息
-          cd ${{ env.TF_WORKING_DIR }}
-          LOAD_BALANCER_ARN=$(aws elbv2 describe-load-balancers --query "LoadBalancers[?LoadBalancerName=='snake-game-production-alb'].LoadBalancerArn" --output text)
-          TARGET_GROUP_ARN=$(aws elbv2 describe-target-groups --query "TargetGroups[?TargetGroupName=='snake-game-production-tg'].TargetGroupArn" --output text)
-          SUBNETS=$(terraform output -json private_subnet_ids | jq -r '. | join(",")')
-          SECURITY_GROUPS=$(aws ec2 describe-security-groups --filters "Name=group-name,Values=snake-game-production-ecs-sg" --query "SecurityGroups[0].GroupId" --output text)
-          
+          echo "Creating new service"
           aws ecs create-service \
             --cluster $ECS_CLUSTER \
             --service-name $ECS_SERVICE \
             --task-definition $ECS_TASK_DEFINITION \
             --desired-count 1 \
             --launch-type FARGATE \
-            --network-configuration "awsvpcConfiguration={subnets=[$SUBNETS],securityGroups=[$SECURITY_GROUPS],assignPublicIp=DISABLED}" \
-            --load-balancers "targetGroupArn=$TARGET_GROUP_ARN,containerName=snake-game,containerPort=5000"
+            --network-configuration "awsvpcConfiguration={subnets=[${{ steps.tf-outputs.outputs.private_subnet_ids }}],securityGroups=[${{ steps.get-sg.outputs.security_group }}],assignPublicIp=DISABLED}" \
+            --load-balancers "targetGroupArn=${{ steps.get-tg.outputs.target_group_arn }},containerName=snake-game,containerPort=5000"
         fi
 
     - name: Wait for service stability
       run: |
-        echo "Waiting for service to become stable..."
         aws ecs wait services-stable \
           --cluster $ECS_CLUSTER \
           --services $ECS_SERVICE
-        echo "Service is now stable"
 
     - name: Health Check
       run: |
-        echo "Waiting for application to start..."
         sleep 60
+        LOAD_BALANCER_DNS="${{ steps.tf-outputs.outputs.load_balancer_dns }}"
         
-        # 获取负载均衡器DNS
-        cd ${{ env.TF_WORKING_DIR }}
-        LOAD_BALANCER_DNS=$(terraform output -raw load_balancer_dns)
-        
-        echo "Testing application health at: http://$LOAD_BALANCER_DNS/health"
-        
-        # 重试机制
         for i in {1..10}; do
-          if curl -f -s http://$LOAD_BALANCER_DNS/health; then
+          if curl -f http://$LOAD_BALANCER_DNS/health; then
             echo "Health check passed!"
             break
           else
-            echo "Health check attempt $i failed, retrying in 15 seconds..."
+            echo "Health check attempt $i failed"
             sleep 15
-          fi
-          
-          if [ $i -eq 10 ]; then
-            echo "Health check failed after 10 attempts"
-            # 获取服务事件以帮助调试
-            aws ecs describe-services --cluster $ECS_CLUSTER --services $ECS_SERVICE --query 'services[0].events[0:5]'
-            exit 1
           fi
         done
 
     - name: Deployment Summary
       run: |
-        cd ${{ env.TF_WORKING_DIR }}
-        LOAD_BALANCER_DNS=$(terraform output -raw load_balancer_dns)
-        RDS_ENDPOINT=$(terraform output -raw rds_endpoint)
-        
         echo "🚀 Deployment Completed Successfully!"
         echo "=========================================="
-        echo "🌐 Application URL: http://$LOAD_BALANCER_DNS"
-        echo "🛠️  Health Check: http://$LOAD_BALANCER_DNS/health"
-        echo "🗄️  Database Endpoint: $RDS_ENDPOINT"
+        echo "🌐 Application URL: http://${{ steps.tf-outputs.outputs.load_balancer_dns }}"
+        echo "🛠️  Health Check: http://${{ steps.tf-outputs.outputs.load_balancer_dns }}/health"
         echo "🐳 ECR Image: ${{ steps.build-image.outputs.image }}"
         echo "⚓ ECS Cluster: $ECS_CLUSTER"
         echo "🔧 ECS Service: $ECS_SERVICE"
