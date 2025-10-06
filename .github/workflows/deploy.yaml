@@ -37,17 +37,21 @@ jobs:
         cd terraform
         terraform apply -auto-approve -var="db_password=${{ secrets.DB_PASSWORD }}"
 
-    - name: Get Terraform outputs
-      id: tf-outputs
+    - name: Get ECR repository URL
+      id: get-ecr-url
       run: |
         cd terraform
-        ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
         ECR_URL=$(terraform output -raw ecr_repository_url)
+        echo "ECR_URL=$ECR_URL" >> $GITHUB_OUTPUT
+        echo "ECR repository URL: $ECR_URL"
+
+    - name: Get ECS task execution role ARN
+      id: get-role-arn
+      run: |
+        cd terraform
         TASK_EXEC_ROLE_ARN=$(terraform output -raw ecs_task_execution_role_arn)
-        
-        echo "ACCOUNT_ID=$ACCOUNT_ID" >> $GITHUB_ENV
-        echo "ECR_URL=$ECR_URL" >> $GITHUB_ENV
-        echo "TASK_EXEC_ROLE_ARN=$TASK_EXEC_ROLE_ARN" >> $GITHUB_ENV
+        echo "TASK_EXEC_ROLE_ARN=$TASK_EXEC_ROLE_ARN" >> $GITHUB_OUTPUT
+        echo "Task execution role ARN: $TASK_EXEC_ROLE_ARN"
 
   deploy-app:
     name: Deploy Application
@@ -73,21 +77,32 @@ jobs:
     - name: Build and push Docker image
       run: |
         cd src
+        # 先构建镜像
         docker build -t snake-game:latest .
-        docker tag snake-game:latest ${{ env.ECR_URL }}:latest
-        docker push ${{ env.ECR_URL }}:latest
+        
+        # 然后使用正确的ECR URL进行标记和推送
+        ECR_URL="${{ needs.terraform.outputs.ECR_URL }}"
+        echo "Pushing to ECR: $ECR_URL:latest"
+        
+        docker tag snake-game:latest $ECR_URL:latest
+        docker push $ECR_URL:latest
 
     - name: Update task definition with correct values
       run: |
         # 使用正确的角色ARN和镜像URL更新任务定义
+        ECR_URL="${{ needs.terraform.outputs.ECR_URL }}"
+        ROLE_ARN="${{ needs.terraform.outputs.TASK_EXEC_ROLE_ARN }}"
+        
+        echo "Using ECR URL: $ECR_URL"
+        echo "Using Role ARN: $ROLE_ARN"
+        
         jq \
-          --arg image "${{ env.ECR_URL }}:latest" \
-          --arg role_arn "${{ env.TASK_EXEC_ROLE_ARN }}" \
+          --arg image "$ECR_URL:latest" \
+          --arg role_arn "$ROLE_ARN" \
           '.containerDefinitions[0].image = $image | .executionRoleArn = $role_arn' \
           task-definition.json > updated-task-definition.json
         
-        echo "Updated task definition:"
-        cat updated-task-definition.json
+        echo "Updated task definition created"
 
     - name: Register ECS task definition
       run: |
@@ -140,6 +155,6 @@ jobs:
         echo "========================================"
         echo "🌐 Application URL: http://$LOAD_BALANCER_DNS"
         echo "🛠️  Health Check: http://$LOAD_BALANCER_DNS/health"
-        echo "🐳 ECR Image: ${{ env.ECR_URL }}:latest"
+        echo "🐳 ECR Image: ${{ needs.terraform.outputs.ECR_URL }}:latest"
         echo "⚓ ECS Cluster: snake-game-production-cluster"
         echo "🔧 ECS Service: snake-game-service"
