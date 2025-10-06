@@ -224,7 +224,7 @@ resource "aws_ecs_task_definition" "snake_game" {
 
 # ECS 服务
 resource "aws_ecs_service" "snake_game" {
-  name            = "${local.name_prefix}-service"
+  name            = "snake-game-service"
   cluster         = aws_ecs_cluster.snake_game.id
   task_definition = aws_ecs_task_definition.snake_game.arn
   desired_count   = 1
