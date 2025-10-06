@@ -27,7 +27,7 @@ resource "aws_security_group" "ecs" {
 
 # ECR 仓库
 resource "aws_ecr_repository" "snake_game" {
-  name = "snake-game"
+  name = "snake-game-repo"
 
   image_scanning_configuration {
     scan_on_push = true
@@ -41,7 +41,7 @@ resource "aws_ecr_repository" "snake_game" {
 
 # ECS 集群
 resource "aws_ecs_cluster" "snake_game" {
-  name = "${local.name_prefix}-cluster"
+  name = "snake-game-cluster"
 
   setting {
     name  = "containerInsights"
