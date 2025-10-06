@@ -8,16 +8,16 @@ env:
   AWS_REGION: us-east-1
   TF_WORKING_DIR: './terraform'
   APP_DIR: './app'
-  ECR_REPO: 'snake-game-repo'   # 你的 ECR 仓库名
+  ECR_REPO: 'snake-game-repo'
   ECS_CLUSTER: 'snake-game-cluster'
   ECS_SERVICE: 'snake-game-service'
 
 jobs:
   terraform:
-    name: Terraform Plan and Apply
+    name: Terraform Apply Infrastructure
     runs-on: ubuntu-latest
     environment: production
-    
+
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -38,23 +38,9 @@ jobs:
       working-directory: ${{ env.TF_WORKING_DIR }}
       run: terraform init
 
-    - name: Terraform Validate
-      working-directory: ${{ env.TF_WORKING_DIR }}
-      run: terraform validate
-
-    - name: Terraform Plan
-      working-directory: ${{ env.TF_WORKING_DIR }}
-      run: terraform plan -out=tfplan
-
     - name: Terraform Apply
       working-directory: ${{ env.TF_WORKING_DIR }}
-      run: terraform apply -auto-approve tfplan
-
-    - name: Upload Terraform State
-      uses: actions/upload-artifact@v4
-      with:
-        name: terraform-state
-        path: ${{ env.TF_WORKING_DIR }}/.terraform
+      run: terraform apply -auto-approve -var="db_password=${{ secrets.DB_PASSWORD }}"
 
   deploy-app:
     name: Build and Deploy Flask App to ECS
@@ -78,15 +64,10 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
 
-    - name: Download Terraform State
-      uses: actions/download-artifact@v4
-      with:
-        name: terraform-state
-        path: ${{ env.TF_WORKING_DIR }}/.terraform
-
-    - name: Terraform Init (for outputs only)
+    # ✅ 直接重新 init backend，从 S3 拉取 state
+    - name: Terraform Init (Load Backend)
       working-directory: ${{ env.TF_WORKING_DIR }}
-      run: terraform init -backend=false
+      run: terraform init -reconfigure
 
     - name: Get RDS Connection Info
       id: get_rds
@@ -123,9 +104,9 @@ jobs:
           --region ${{ env.AWS_REGION }}
         echo "✅ ECS service updated successfully"
 
-    - name: Print Deployment Info
+    - name: Deployment Info
       run: |
-        echo "✅ Deployment completed"
+        echo "✅ Deployment complete"
         echo "ECS Cluster: ${{ env.ECS_CLUSTER }}"
         echo "ECS Service: ${{ env.ECS_SERVICE }}"
         echo "ECR Image: ${{ env.IMAGE_URI }}"
