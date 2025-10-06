@@ -56,7 +56,7 @@ resource "aws_db_instance" "snake_game" {
   vpc_security_group_ids = [aws_security_group.rds.id]
   db_subnet_group_name   = aws_db_subnet_group.snake_game.name
 
-  parameter_group_name = "default.postgres15"
+  parameter_group_name = "default.postgres14"
   multi_az             = var.environment == "production" ? true : false
 
   backup_retention_period = 7
