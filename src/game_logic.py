@@ -1,14 +1,12 @@
 import random
-import curses
-import time
+import json
 from datetime import datetime
 
 class SnakeGame:
-    def __init__(self, width=20, height=20, session_id=None, max_obstacles=10):
+    def __init__(self, width=20, height=20, session_id=None):
         self.width = width
         self.height = height
         self.session_id = session_id or self._generate_session_id()
-        self.max_obstacles = max_obstacles
         self.reset()
     
     def _generate_session_id(self):
@@ -21,36 +19,26 @@ class SnakeGame:
         self.score = 0
         self.level = 1
         self.game_over = False
-        self.paused = False
-        self.speed = 600  # 初始速度(ms)
+        self.speed = 600  # 起始速度(ms)
         self.moves_count = 0
-        self.obstacles = self.generate_obstacles()
-        self.high_score = 0
     
     def generate_food(self):
         while True:
             food = (random.randint(0, self.width - 1), random.randint(0, self.height - 1))
-            if food not in self.snake and food not in self.obstacles:
+            if food not in self.snake:
                 return food
-
-    def generate_obstacles(self):
-        obstacles = set()
-        while len(obstacles) < self.max_obstacles:
-            pos = (random.randint(0, self.width - 1), random.randint(0, self.height - 1))
-            if pos != (self.width // 2, self.height // 2):
-                obstacles.add(pos)
-        return list(obstacles)
     
     def change_direction(self, new_direction):
-        opposite = {'UP':'DOWN','DOWN':'UP','LEFT':'RIGHT','RIGHT':'LEFT'}
-        if new_direction != opposite.get(self.direction):
+        opposite_directions = {'UP': 'DOWN', 'DOWN': 'UP', 'LEFT': 'RIGHT', 'RIGHT': 'LEFT'}
+        if new_direction != opposite_directions.get(self.direction):
             self.direction = new_direction
     
     def move(self):
-        if self.game_over or self.paused:
+        if self.game_over:
             return False
         
         head_x, head_y = self.snake[0]
+        
         if self.direction == 'UP':
             new_head = (head_x, head_y - 1)
         elif self.direction == 'DOWN':
@@ -63,11 +51,8 @@ class SnakeGame:
         # 碰撞检测
         if (new_head[0] < 0 or new_head[0] >= self.width or
             new_head[1] < 0 or new_head[1] >= self.height or
-            new_head in self.snake or
-            new_head in self.obstacles):
+            new_head in self.snake):
             self.game_over = True
-            if self.score > self.high_score:
-                self.high_score = self.score
             return False
         
         self.snake.insert(0, new_head)
@@ -77,17 +62,15 @@ class SnakeGame:
         if new_head == self.food:
             self.score += 10
             self.food = self.generate_food()
-            
-            # 升级加速
             if self.score % 50 == 0:
                 self.level += 1
-                if self.speed > 100:
-                    self.speed -= 20
+                if self.speed > 50:
+                    self.speed -= 10
             return True
         else:
             self.snake.pop()
             return False
-
+    
     def get_state(self):
         return {
             'id': self.session_id,
@@ -100,11 +83,9 @@ class SnakeGame:
             'speed': self.speed,
             'width': self.width,
             'height': self.height,
-            'moves_count': self.moves_count,
-            'obstacles': self.obstacles,
-            'high_score': self.high_score
+            'moves_count': self.moves_count
         }
-
+    
     def from_dict(self, data):
         self.session_id = data['id']
         self.snake = data['snake']
@@ -117,90 +98,25 @@ class SnakeGame:
         self.width = data['width']
         self.height = data['height']
         self.moves_count = data.get('moves_count', 0)
-        self.obstacles = data.get('obstacles', [])
-        self.high_score = data.get('high_score', 0)
-
-    def render(self, stdscr):
-        stdscr.clear()
-        curses.start_color()
-        curses.init_pair(1, curses.COLOR_GREEN, curses.COLOR_BLACK)  # 蛇
-        curses.init_pair(2, curses.COLOR_RED, curses.COLOR_BLACK)    # 食物
-        curses.init_pair(3, curses.COLOR_YELLOW, curses.COLOR_BLACK) # 边框
-        curses.init_pair(4, curses.COLOR_CYAN, curses.COLOR_BLACK)   # 文字
-        curses.init_pair(5, curses.COLOR_MAGENTA, curses.COLOR_BLACK) # 障碍
-        curses.init_pair(6, curses.COLOR_WHITE, curses.COLOR_BLACK) # 蛇头
-        
-        # 边框
-        for x in range(self.width + 2):
-            stdscr.addstr(0, x * 2, "██", curses.color_pair(3))
-            stdscr.addstr(self.height + 1, x * 2, "██", curses.color_pair(3))
-        for y in range(1, self.height + 1):
-            stdscr.addstr(y, 0, "██", curses.color_pair(3))
-            stdscr.addstr(y, (self.width + 1) * 2, "██", curses.color_pair(3))
-        
-        # 蛇
-        for i, (x, y) in enumerate(self.snake):
-            if i == 0:
-                stdscr.addstr(y + 1, (x + 1) * 2, "██", curses.color_pair(6))
-            else:
-                stdscr.addstr(y + 1, (x + 1) * 2, "██", curses.color_pair(1))
-        
-        # 食物
-        fx, fy = self.food
-        stdscr.addstr(fy + 1, (fx + 1) * 2, "██", curses.color_pair(2))
-        
-        # 障碍
-        for ox, oy in self.obstacles:
-            stdscr.addstr(oy + 1, (ox + 1) * 2, "██", curses.color_pair(5))
-        
-        # 信息
-        stdscr.addstr(self.height + 3, 0, f"Score: {self.score}  High: {self.high_score}  Level: {self.level}  Speed: {self.speed}ms", curses.color_pair(4))
-        if self.paused:
-            stdscr.addstr(self.height + 4, 0, "PAUSED - Press 'p' to continue", curses.color_pair(4))
-        stdscr.refresh()
     
-    def run(self):
-        curses.wrapper(self._main_loop)
-
-    def _main_loop(self, stdscr):
-        stdscr.nodelay(True)
-        key = curses.KEY_RIGHT
-        key_map = {
-            curses.KEY_UP: 'UP',
-            curses.KEY_DOWN: 'DOWN',
-            curses.KEY_LEFT: 'LEFT',
-            curses.KEY_RIGHT: 'RIGHT',
-            ord('w'): 'UP',
-            ord('s'): 'DOWN',
-            ord('a'): 'LEFT',
-            ord('d'): 'RIGHT'
-        }
-
-        while True:
-            try:
-                next_key = stdscr.getch()
-                if next_key != -1:
-                    key = next_key
-                    if key in key_map:
-                        self.change_direction(key_map[key])
-                    elif key in [ord('p'), ord('P')]:
-                        self.paused = not self.paused
-                    elif key in [ord('q'), ord('Q')]:
-                        break
-                    elif key in [ord('r'), ord('R')] and self.game_over:
-                        self.reset()
-                
-                self.move()
-                self.render(stdscr)
-                time.sleep(self.speed / 1000.0)
-            except KeyboardInterrupt:
-                break
-
-        stdscr.addstr(self.height + 5, 0, "Game exited. Press any key.", curses.color_pair(4))
-        stdscr.nodelay(False)
-        stdscr.getch()
-
-# 运行游戏
-if __name__ == "__main__":
-    game = SnakeGame(width=25, height=20, max_obstacles=15)
-    game.run()
+    # ----------------------------
+    # 美观显示函数 (终端用)
+    # ----------------------------
+    def render(self):
+        # 使用 Unicode 方块显示
+        board = ""
+        for y in range(self.height):
+            for x in range(self.width):
+                if (x, y) == self.snake[0]:
+                    board += "🟢"  # 蛇头
+                elif (x, y) in self.snake[1:]:
+                    board += "🟩"  # 蛇身
+                elif (x, y) == self.food:
+                    board += "🍎"  # 食物
+                else:
+                    board += "⬛"  # 空白
+            board += "\n"
+        board += f"Score: {self.score}  Level: {self.level}  Speed: {self.speed}ms\n"
+        if self.game_over:
+            board += "💀 Game Over 💀\n"
+        return board
