@@ -10,6 +10,7 @@ env:
   ECS_CLUSTER: snake-game-production-cluster
   ECS_SERVICE: snake-game-service
   ECS_TASK_FAMILY: snake-game-task
+  TF_WORKING_DIR: terraform
 
 jobs:
   terraform:
@@ -18,11 +19,16 @@ jobs:
     environment: production
     
     steps:
-    - name: Checkout
+    - name: Checkout Repository
       uses: actions/checkout@v4
 
     - name: Setup Terraform
       uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: 1.9.5  # ✅ 明确版本，防止 "terraform not found"
+
+    - name: Verify Terraform Installation
+      run: terraform version
 
     - name: Configure AWS credentials
       uses: aws-actions/configure-aws-credentials@v4
@@ -32,14 +38,16 @@ jobs:
         aws-region: ${{ env.AWS_REGION }}
 
     - name: Terraform Init
-      run: |
-        cd terraform
-        terraform init
+      working-directory: ${{ env.TF_WORKING_DIR }}
+      run: terraform init
+
+    - name: Terraform Validate
+      working-directory: ${{ env.TF_WORKING_DIR }}
+      run: terraform validate
 
     - name: Terraform Apply
-      run: |
-        cd terraform
-        terraform apply -auto-approve -var="db_password=${{ secrets.DB_PASSWORD }}"
+      working-directory: ${{ env.TF_WORKING_DIR }}
+      run: terraform apply -auto-approve -var="db_password=${{ secrets.DB_PASSWORD }}"
 
   deploy-app:
     name: Deploy Application
@@ -48,7 +56,7 @@ jobs:
     environment: production
 
     steps:
-    - name: Checkout
+    - name: Checkout Repository
       uses: actions/checkout@v4
 
     - name: Configure AWS credentials
@@ -69,27 +77,26 @@ jobs:
         echo "ACCOUNT_ID=$ACCOUNT_ID" >> $GITHUB_ENV
         echo "Account ID: $ACCOUNT_ID"
 
-    - name: Build Docker image
+    - name: Build Docker Image
       run: |
         cd src
         docker build -t ${{ env.ECR_REPOSITORY }}:${{ github.sha }} .
 
-    - name: Push Docker image to ECR
+    - name: Push Docker Image to ECR
       run: |
         ECR_REGISTRY=${{ steps.login-ecr.outputs.registry }}
         ECR_IMAGE="$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ github.sha }}"
         
         echo "Pushing to ECR: $ECR_IMAGE"
-        
         docker tag ${{ env.ECR_REPOSITORY }}:${{ github.sha }} $ECR_IMAGE
         docker push $ECR_IMAGE
         
         echo "ECR_IMAGE=$ECR_IMAGE" >> $GITHUB_ENV
 
-    - name: Get RDS connection info
+    - name: Get RDS Connection Info
       id: rds-info
+      working-directory: ${{ env.TF_WORKING_DIR }}
       run: |
-        cd terraform
         RDS_ENDPOINT=$(terraform output -raw rds_endpoint)
         DB_USERNAME=$(terraform output -raw db_username)
         DB_NAME=$(terraform output -raw db_name)
@@ -98,26 +105,19 @@ jobs:
         echo "DB_USERNAME=$DB_USERNAME" >> $GITHUB_ENV
         echo "DB_NAME=$DB_NAME" >> $GITHUB_ENV
 
-    - name: Get ECS task execution role
+    - name: Get ECS Task Execution Role
       id: ecs-role
       run: |
-        # 查找ECS任务执行角色
         TASK_EXEC_ROLE_ARN=$(aws iam list-roles --query "Roles[?contains(RoleName, 'ecsTaskExecutionRole')].Arn" --output text | head -1)
-        
         if [ -z "$TASK_EXEC_ROLE_ARN" ]; then
-          # 如果找不到，使用默认角色名称
           TASK_EXEC_ROLE_ARN="arn:aws:iam::${{ env.ACCOUNT_ID }}:role/ecsTaskExecutionRole"
         fi
-        
         echo "TASK_EXEC_ROLE_ARN=$TASK_EXEC_ROLE_ARN" >> $GITHUB_ENV
         echo "Using ECS task execution role: $TASK_EXEC_ROLE_ARN"
 
-    - name: Create task definition from template
+    - name: Create Task Definition JSON
       run: |
-        # 构建数据库连接字符串
         DATABASE_URL="postgresql://${{ env.DB_USERNAME }}:${{ secrets.DB_PASSWORD }}@${{ env.RDS_ENDPOINT }}/${{ env.DB_NAME }}"
-        
-        # 创建任务定义
         cat > task-definition.json << EOF
         {
           "family": "${{ env.ECS_TASK_FAMILY }}",
@@ -132,25 +132,12 @@ jobs:
               "image": "${{ env.ECR_IMAGE }}",
               "essential": true,
               "portMappings": [
-                {
-                  "containerPort": 5000,
-                  "hostPort": 5000,
-                  "protocol": "tcp"
-                }
+                { "containerPort": 5000, "hostPort": 5000, "protocol": "tcp" }
               ],
               "environment": [
-                {
-                  "name": "DATABASE_URL",
-                  "value": "$DATABASE_URL"
-                },
-                {
-                  "name": "ENVIRONMENT",
-                  "value": "production"
-                },
-                {
-                  "name": "AWS_REGION",
-                  "value": "${{ env.AWS_REGION }}"
-                }
+                { "name": "DATABASE_URL", "value": "$DATABASE_URL" },
+                { "name": "ENVIRONMENT", "value": "production" },
+                { "name": "AWS_REGION", "value": "${{ env.AWS_REGION }}" }
               ],
               "logConfiguration": {
                 "logDriver": "awslogs",
@@ -164,15 +151,13 @@ jobs:
           ]
         }
         EOF
-        
-        echo "Task definition created successfully"
+        echo "✅ Task definition created successfully."
         cat task-definition.json
 
-    - name: Register ECS task definition
-      run: |
-        aws ecs register-task-definition --cli-input-json file://task-definition.json
+    - name: Register ECS Task Definition
+      run: aws ecs register-task-definition --cli-input-json file://task-definition.json
 
-    - name: Update ECS service
+    - name: Update ECS Service
       run: |
         aws ecs update-service \
           --cluster ${{ env.ECS_CLUSTER }} \
@@ -180,31 +165,28 @@ jobs:
           --task-definition ${{ env.ECS_TASK_FAMILY }} \
           --force-new-deployment
 
-    - name: Wait for deployment
+    - name: Wait for ECS Deployment to Stabilize
       run: |
-        echo "Waiting for deployment to complete..."
-        sleep 30
+        echo "⏳ Waiting for ECS service to stabilize..."
         aws ecs wait services-stable \
           --cluster ${{ env.ECS_CLUSTER }} \
           --services ${{ env.ECS_SERVICE }}
+        echo "✅ ECS service is stable."
 
-    - name: Health check
+    - name: Health Check
       run: |
-        # 获取负载均衡器DNS
         LOAD_BALANCER_DNS=$(aws elbv2 describe-load-balancers \
           --query 'LoadBalancers[?LoadBalancerName==`snake-game-production-alb`].DNSName' \
           --output text)
-        
         echo "Application URL: http://$LOAD_BALANCER_DNS"
-        echo "Testing health endpoint..."
         
-        # 健康检查
+        echo "Running health checks..."
         for i in {1..15}; do
-          if curl -f -s http://$LOAD_BALANCER_DNS/health > /dev/null; then
+          if curl -fs http://$LOAD_BALANCER_DNS/health >/dev/null; then
             echo "✅ Health check passed!"
             break
           else
-            echo "⏳ Health check attempt $i failed, retrying in 10 seconds..."
+            echo "⏳ Attempt $i failed, retrying in 10s..."
             sleep 10
           fi
         done
