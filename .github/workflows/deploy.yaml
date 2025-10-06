@@ -37,6 +37,18 @@ jobs:
         cd terraform
         terraform apply -auto-approve -var="db_password=${{ secrets.DB_PASSWORD }}"
 
+    - name: Get Terraform outputs
+      id: tf-outputs
+      run: |
+        cd terraform
+        ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+        ECR_URL=$(terraform output -raw ecr_repository_url)
+        TASK_EXEC_ROLE_ARN=$(terraform output -raw ecs_task_execution_role_arn)
+        
+        echo "ACCOUNT_ID=$ACCOUNT_ID" >> $GITHUB_ENV
+        echo "ECR_URL=$ECR_URL" >> $GITHUB_ENV
+        echo "TASK_EXEC_ROLE_ARN=$TASK_EXEC_ROLE_ARN" >> $GITHUB_ENV
+
   deploy-app:
     name: Deploy Application
     runs-on: ubuntu-latest
@@ -62,15 +74,20 @@ jobs:
       run: |
         cd src
         docker build -t snake-game:latest .
-        docker tag snake-game:latest ${{ steps.login-ecr.outputs.registry }}/snake-game:latest
-        docker push ${{ steps.login-ecr.outputs.registry }}/snake-game:latest
+        docker tag snake-game:latest ${{ env.ECR_URL }}:latest
+        docker push ${{ env.ECR_URL }}:latest
 
-    - name: Update task definition with new image
-      id: update-task-def
+    - name: Update task definition with correct values
       run: |
-        # 使用现有的 task-definition.json，只更新镜像
-        jq '.containerDefinitions[0].image = "${{ steps.login-ecr.outputs.registry }}/snake-game:latest"' task-definition.json > updated-task-definition.json
-        echo "Task definition updated with new image"
+        # 使用正确的角色ARN和镜像URL更新任务定义
+        jq \
+          --arg image "${{ env.ECR_URL }}:latest" \
+          --arg role_arn "${{ env.TASK_EXEC_ROLE_ARN }}" \
+          '.containerDefinitions[0].image = $image | .executionRoleArn = $role_arn' \
+          task-definition.json > updated-task-definition.json
+        
+        echo "Updated task definition:"
+        cat updated-task-definition.json
 
     - name: Register ECS task definition
       run: |
@@ -123,6 +140,6 @@ jobs:
         echo "========================================"
         echo "🌐 Application URL: http://$LOAD_BALANCER_DNS"
         echo "🛠️  Health Check: http://$LOAD_BALANCER_DNS/health"
-        echo "🐳 ECR Image: ${{ steps.login-ecr.outputs.registry }}/snake-game:latest"
+        echo "🐳 ECR Image: ${{ env.ECR_URL }}:latest"
         echo "⚓ ECS Cluster: snake-game-production-cluster"
         echo "🔧 ECS Service: snake-game-service"
