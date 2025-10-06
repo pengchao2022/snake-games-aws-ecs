@@ -39,20 +39,6 @@ output "nat_gateway_ip" {
   value       = aws_eip.nat.public_ip
 }
 
-output "ecr_repository_url" {
-  description = "ECR repository URL"
-  value       = aws_ecr_repository.snake_game.repository_url
-}
-
-output "ecs_cluster_name" {
-  description = "ECS cluster name"
-  value       = aws_ecs_cluster.snake_game.name
-}
-
-output "load_balancer_dns" {
-  description = "Load Balancer DNS name"
-  value       = aws_lb.snake_game.dns_name
-}
 
 output "db_password" {
   description = "Database password (only if generated)"
